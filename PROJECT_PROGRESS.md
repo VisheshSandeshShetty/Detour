@@ -34,3 +34,22 @@ The exact manual failure was never captured. Likely cause (unconfirmed): the old
 2. Delete `server/src/tests/nearby-overpass.test.ts` if it exists.
 3. `npm test --prefix server`, then `npm run check:services --prefix server`.
 4. Try Around me at 1, 5, 25 km and a short route (Mangalore to Udupi) before a long one.
+
+## V2 release milestone — 2026-11-01
+
+Detour V2 is feature complete.
+
+### Included features
+- Around Me: nearby place discovery with customizable search radius.
+- Plan a Route: discover places along a planned journey.
+- Surprise Me: spontaneous place discovery.
+- Geographic tile-based search with caching and controlled concurrency.
+- Improved partial-failure handling for Overpass requests.
+- Updated search validation, automated tests, and documentation.
+
+### Validation
+- 66 automated logic tests passing (mocked tests).
+- Real-world API performance and large-radius search behaviour remain subject to further testing.
+
+Release: v2.1.0
+Status: Feature complete.
