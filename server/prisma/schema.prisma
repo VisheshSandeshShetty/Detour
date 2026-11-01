@@ -1,0 +1,89 @@
+// Detour database schema (PostgreSQL via Prisma).
+//
+// Design note: we do NOT store every attraction we discover. Places coming from
+// OpenStreetMap are only written to the Place table when a user saves them or adds
+// them to a saved journey. Everything else lives in a short-lived in-memory cache.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           Int          @id @default(autoincrement())
+  name         String
+  email        String       @unique
+  passwordHash String
+  createdAt    DateTime     @default(now())
+  journeys     Journey[]
+  savedPlaces  SavedPlace[]
+}
+
+model Place {
+  id          Int          @id @default(autoincrement())
+  // OpenStreetMap identity such as "node-123456" or "way-987654".
+  // Unique, so saving the same place twice re-uses one row.
+  providerId  String       @unique
+  name        String
+  category    String
+  latitude    Float
+  longitude   Float
+  description String?
+  // OpenStreetMap has no ratings, so this stays null unless a rating source is added later.
+  rating      Float?
+  imageUrl    String?
+  savedBy     SavedPlace[]
+  stops       JourneyStop[]
+}
+
+model Journey {
+  id                   Int           @id @default(autoincrement())
+  userId               Int
+  user                 User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  originName           String
+  destinationName      String
+  originLatitude       Float
+  originLongitude      Float
+  destinationLatitude  Float
+  destinationLongitude Float
+  // Corridor radius in kilometres (5, 10, 20 or 30)
+  corridorRadius       Int
+  // Kilometres
+  totalDistance        Float
+  // Minutes
+  estimatedDuration    Float
+  createdAt            DateTime      @default(now())
+  stops                JourneyStop[]
+
+  @@index([userId])
+}
+
+model SavedPlace {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  placeId   Int
+  place     Place    @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  // A user can save a given place only once
+  @@unique([userId, placeId])
+  @@index([placeId])
+}
+
+model JourneyStop {
+  id        Int     @id @default(autoincrement())
+  journeyId Int
+  journey   Journey @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  placeId   Int
+  place     Place   @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  // 1 = first stop on the trip
+  stopOrder Int
+
+  @@unique([journeyId, placeId])
+  @@index([placeId])
+}
