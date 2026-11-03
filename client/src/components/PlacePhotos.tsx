@@ -22,18 +22,22 @@ export default function PlacePhotos({ place, ready }: { place: Pick<Place, 'id' 
 
   useEffect(() => {
     if (!ready) return;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), GIVE_UP_AFTER_MS);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const giveUp = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('timeout')), GIVE_UP_AFTER_MS);
+    });
     setState({ kind: 'loading' });
     setIndex(0);
-    api
-      .placePhotos(place)
+    Promise.race([api.placePhotos(place), giveUp])
       .then((result) => {
+        if (cancelled) return;
         if (result.status === 'unavailable') throw new Error('unavailable');
         setState({ kind: 'done', result });
       })
-      .catch(() => {
-        if (controller.signal.aborted && autoRetried.current === place.id) return setState({ kind: 'unavailable' });
+      .catch((error: Error) => {
+        if (cancelled) return;
+        if (error.message === 'timeout') return setState({ kind: 'unavailable' });
         if (autoRetried.current !== place.id) {
           autoRetried.current = place.id;
           setAttempt((n) => n + 1); // a slow network often works on the second try
@@ -41,8 +45,8 @@ export default function PlacePhotos({ place, ready }: { place: Pick<Place, 'id' 
       })
       .finally(() => clearTimeout(timer));
     return () => {
+      cancelled = true;
       clearTimeout(timer);
-      controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [place.id, ready, attempt]);

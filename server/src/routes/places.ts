@@ -4,7 +4,7 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { findNearbyPlaces } from '../services/nearby';
-import { getOsmTagsQuickly, getPlaceDetails, parseOsmId } from '../services/places';
+import { getCachedOsmTags, getOsmTagsQuickly, getPlaceDetails, parseOsmId } from '../services/places';
 import { getPhotos } from '../services/photos';
 
 const router = Router();
@@ -46,7 +46,7 @@ router.get('/nearby', async (req, res) => {
 // Real photographs only. Answers { status: 'ok' | 'none' | 'unavailable', photos, searched }.
 const photosLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 200,
+  limit: 800,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   message: { error: { message: 'Too many photo requests. Please wait a few minutes.' } },
@@ -56,15 +56,17 @@ const photosQuery = z.object({
   lat: z.coerce.number().min(-90).max(90),
   lon: z.coerce.number().min(-180).max(180),
   near: z.string().max(400).optional(),
+  light: z.string().optional(),
 });
 
 router.get('/:id/photos', photosLimiter, async (req, res) => {
   const id = String(req.params.id);
   parseOsmId(id);
   const q = photosQuery.parse(req.query);
-  const tags = await getOsmTagsQuickly(id);
+  const light = q.light === '1';
+  const tags = light ? getCachedOsmTags(id) : await getOsmTagsQuickly(id);
   const result = await getPhotos({
-    id,
+    id: light ? `${id}:light` : id, // list-card searches are cached separately from the full page search
     name: tags['name:en'] ?? tags.name ?? q.name,
     latitude: q.lat,
     longitude: q.lon,

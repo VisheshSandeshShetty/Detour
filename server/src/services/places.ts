@@ -62,6 +62,11 @@ export async function getOsmTagsQuickly(id: string, waitMs = 1200): Promise<Reco
   }
 }
 
+// Tags only if we already have them in memory (never starts a new places-service lookup)
+export function getCachedOsmTags(id: string): Record<string, string> {
+  return cacheGet<OsmElement>(`osm-element:${id}`)?.tags ?? {};
+}
+
 export async function getPlaceDetails(id: string): Promise<PlaceDetails> {
   parseOsmId(id);
   const cacheKey = `details:${id}`;

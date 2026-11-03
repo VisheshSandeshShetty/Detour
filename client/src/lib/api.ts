@@ -98,7 +98,27 @@ function toPlaceInput(place: Place) {
   };
 }
 
+// Photo lookups are remembered for this visit, so a photo asked for early (hover, popup) is instant later.
+// A failed or 'unavailable' answer is forgotten so the next ask tries again.
+type PhotoPlace = Pick<Place, 'id' | 'name' | 'latitude' | 'longitude'>;
 const photoCache = new Map<string, Promise<PhotosResult>>();
+
+// Photos for list cards: at most 2 searches at once, remembered for this visit
+const cardPhotoCache = new Map<string, Promise<string | null>>();
+let cardActive = 0;
+const cardQueue: (() => void)[] = [];
+function waitForCardSlot(): Promise<void> {
+  if (cardActive < 2) {
+    cardActive++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => cardQueue.push(resolve));
+}
+function freeCardSlot() {
+  const next = cardQueue.shift();
+  if (next) next();
+  else cardActive--;
+}
 
 export const api = {
   // ----- accounts -----
@@ -125,23 +145,43 @@ export const api = {
   placeDetails: (id: string, signal?: AbortSignal) =>
     request<{ place: PlaceDetails }>(`/places/${encodeURIComponent(id)}`, { signal }).then((data) => data.place),
 
-    // Real photographs of a place (Wikimedia Commons / OSM / Wikidata). Never generic pictures.
-  // Searches are remembered for this visit and can be started early with prefetchPhotos.
-  placePhotos: (place: Pick<Place, 'id' | 'name' | 'latitude' | 'longitude'>) => {
+  // Real photographs of a place (Wikimedia Commons / OSM / Wikidata). Never generic pictures.
+  placePhotos: (place: PhotoPlace): Promise<PhotosResult> => {
     const cached = photoCache.get(place.id);
     if (cached) return cached;
     const promise = request<PhotosResult>(
       `/places/${encodeURIComponent(place.id)}/photos?${new URLSearchParams({ name: place.name, lat: String(place.latitude), lon: String(place.longitude) })}`
     ).then((result) => {
-      if (result.status === 'unavailable') photoCache.delete(place.id); // never remember a failure
+      if (result.status === 'unavailable') photoCache.delete(place.id);
       return result;
     });
     promise.catch(() => photoCache.delete(place.id));
     photoCache.set(place.id, promise);
     return promise;
   },
-  prefetchPhotos: (place: Pick<Place, 'id' | 'name' | 'latitude' | 'longitude'>) => {
+  // Start the photo search early (e.g. on hover) so Place Details has it ready
+  prefetchPhotos: (place: PhotoPlace) => {
     void api.placePhotos(place).catch(() => undefined);
+  },
+  // First real photo for a list card. Cheap search; returns null when there is none.
+  cardPhoto: (place: PhotoPlace) => {
+    const cached = cardPhotoCache.get(place.id);
+    if (cached) return cached;
+    const promise = (async () => {
+      await waitForCardSlot();
+      try {
+        const result = await request<PhotosResult>(
+          `/places/${encodeURIComponent(place.id)}/photos?${new URLSearchParams({ name: place.name, lat: String(place.latitude), lon: String(place.longitude), light: '1' })}`
+        );
+        if (result.status === 'unavailable') throw new Error('unavailable');
+        return result.photos[0]?.url ?? null;
+      } finally {
+        freeCardSlot();
+      }
+    })();
+    promise.catch(() => cardPhotoCache.delete(place.id)); // failures are retried next time
+    cardPhotoCache.set(place.id, promise);
+    return promise;
   },
 
   // ----- journeys -----

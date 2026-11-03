@@ -147,12 +147,12 @@ function PreviewImage({ place }: { place: Place }) {
   useEffect(() => {
     setUrl(place.imageUrl);
     if (place.imageUrl) return;
-    const controller = new AbortController();
+    let cancelled = false;
     api
       .placePhotos(place)
-      .then((result) => setUrl(result.photos[0]?.url ?? null))
+      .then((result) => { if (!cancelled) setUrl(result.photos[0]?.url ?? null); })
       .catch(() => undefined);
-    return () => controller.abort();
+    return () => { cancelled = true; };
   }, [place.id]);
   return <PlaceImage place={{ ...place, imageUrl: url }} className="h-14 w-14 shrink-0 rounded-lg" />;
 }
