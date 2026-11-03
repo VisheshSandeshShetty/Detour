@@ -1,7 +1,12 @@
 // A small wrapper around fetch() used for every call to an outside service.
 // It adds a User-Agent, a timeout, and turns every kind of failure into one error type.
 
+import dns from 'node:dns';
 import { config } from '../config';
+
+// On WSL and some home networks IPv6 is advertised but does not work. Node would then wait for
+// IPv6 and fail with "Network error" while curl -4 works. Asking for IPv4 first avoids that.
+dns.setDefaultResultOrder('ipv4first');
 
 export class UpstreamError extends Error {
   status: number | null; // HTTP status, or null for network errors and timeouts
@@ -35,7 +40,10 @@ export async function fetchJson<T>(url: string, options: FetchJsonOptions = {}):
     });
   } catch (error) {
     const timedOut = error instanceof Error && error.name === 'TimeoutError';
-    throw new UpstreamError(timedOut ? `Timed out after ${timeoutMs / 1000}s` : 'Network error');
+    // The real reason (ECONNRESET, ENOTFOUND, ETIMEDOUT ...) is hidden inside error.cause
+    const cause = (error as { cause?: { code?: string; message?: string } }).cause;
+    const reason = cause?.code ?? cause?.message;
+    throw new UpstreamError(timedOut ? `Timed out after ${timeoutMs / 1000}s` : `Network error${reason ? ` (${reason})` : ''}`);
   }
 
   if (!response.ok) {

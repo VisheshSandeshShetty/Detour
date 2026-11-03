@@ -60,6 +60,7 @@ export default function Explore() {
   const [error, setError] = useState('');
   const [warning, setWarning] = useState<string | null>(null);
   const [reloadCount, setReloadCount] = useState(0);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
   // What does the user want to see?
   const [categories, setCategories] = useState<CategoryKey[]>([]);
@@ -113,8 +114,22 @@ export default function Explore() {
     setStatus('loading');
     setSelectedId(null);
 
+    setProgress(null);
+
+    // A random id lets the server tell us how far the search is ("3 of 9 sections")
+    const progressId =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `p-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+    const poll = setInterval(() => {
+      api
+        .nearbyProgress(progressId, controller.signal)
+        .then((p) => p.total > 0 && setProgress(p))
+        .catch(() => undefined); // progress is only a nicety, ignore its errors
+    }, 1000);
+
     api
-      .nearby(center.latitude, center.longitude, radiusKm, controller.signal)
+      .nearby(center.latitude, center.longitude, radiusKm, controller.signal, progressId)
       .then((data) => {
         setPlaces(data.places);
         setWarning(data.warning);
@@ -124,8 +139,12 @@ export default function Explore() {
         if (isAbort(e)) return;
         setError(errorMessage(e));
         setStatus('error');
-      });
-    return () => controller.abort();
+      })
+      .finally(() => clearInterval(poll));
+    return () => {
+      clearInterval(poll);
+      controller.abort();
+    };
   }, [center, radiusKm, reloadCount]);
 
   // ---- 4. Filter and sort in the browser (no new requests) ----
@@ -322,7 +341,7 @@ export default function Explore() {
             {status === 'loading' && (
               <>
                 <p className="mb-3 text-sm text-muted">
-                  Searching {radiusKm} km around {center?.label ?? 'you'}... {radiusKm > 10 ? 'Larger areas are searched section by section and can take up to a minute.' : ''}
+                  Searching {radiusKm} km around {center?.label ?? 'you'}... {progress ? `Map sections searched: ${progress.done} of ${progress.total}.` : radiusKm > 10 ? 'Larger areas are searched section by section.' : ''}
                 </p>
                 <CardSkeletons />
               </>

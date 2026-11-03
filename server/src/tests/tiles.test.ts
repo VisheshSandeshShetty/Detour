@@ -129,9 +129,25 @@ describe('nearby search', () => {
     assert.match(result.warning ?? '', /map sections could be searched/);
   });
 
-  test('if every tile fails, the error comes through', async () => {
+  test('if every tile fails far from the demo area, the error comes through', async () => {
     failAll = true;
-    await assert.rejects(() => findNearbyPlaces(13.35, 74.78, 5, 500), /Overpass/);
+    await assert.rejects(() => findNearbyPlaces(40.7, -74.0, 5, 500), /Overpass/);
+  });
+
+  test('if every tile fails near Udupi, the built-in demo places are shown with a clear warning', async () => {
+    failAll = true;
+    const result = await findNearbyPlaces(13.34, 74.75, 5, 500);
+    assert.ok(result.places.some((p) => p.name.includes('Krishna Matha')));
+    assert.ok(result.places.every((p) => (p.distanceKm ?? 0) <= 5));
+    assert.match(result.warning ?? '', /DEMO/);
+  });
+
+  test('progress is reported tile by tile', async () => {
+    const seen: string[] = [];
+    await findNearbyPlaces(13.35, 74.78, 20, 500, (done, total) => seen.push(`${done}/${total}`));
+    assert.equal(seen[0].startsWith('0/'), true);
+    const last = seen[seen.length - 1].split('/');
+    assert.equal(last[0], last[1]);
   });
 });
 
@@ -146,5 +162,14 @@ describe('route search', () => {
     const partial = await fetchCorridorCandidates([route], 10);
     assert.ok(partial.failedStretches >= 1 && partial.failedStretches < partial.totalStretches);
     assert.ok(partial.candidates.length > 0);
+  });
+
+  test('if the whole route search fails inside the demo area, demo places are used and flagged', async () => {
+    const route = [[74.75, 13.2], [74.75, 13.5]];
+    failAll = true;
+    const result = await fetchCorridorCandidates([route], 10);
+    assert.equal(result.demo, true);
+    assert.ok(result.candidates.length > 0);
+    await assert.rejects(() => fetchCorridorCandidates([[[-74, 40.6], [-74, 40.9]]], 10), /Overpass/);
   });
 });

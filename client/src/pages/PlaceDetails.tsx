@@ -1,28 +1,30 @@
 // "/places/:id"  Place Details.
 //
-// If the user arrived from a card or map popup we already know the basics (and, for journeys,
-// the detour numbers), so the page appears instantly. Meanwhile we ask the server for the full
-// details (opening hours, Wikipedia description ...).
+// Deliberately simple: photo, name, category, coordinates, favourites, Add to Trip, Navigate,
+// Open in Google Maps, location info, opening hours and a map. If the user arrived from a card or map
+// popup we already know the basics, so the page appears instantly; the server adds the opening hours.
 
 import {
   ArrowLeft,
+  Check,
   Clock,
   ExternalLink,
   Globe,
   Heart,
-  ImageOff,
   MapPin,
   Navigation,
   Phone,
+  Plus,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import DetourStats from '../components/DetourStats';
 import MapView from '../components/MapView';
-import { PlaceImage } from '../components/PlaceCard';
+import PlacePhotos from '../components/PlacePhotos';
 import { Spinner, ErrorBanner } from '../components/ui';
+import { useActiveTrip } from '../context/ActiveTripContext';
 import { useSavedPlaces } from '../context/SavedPlacesContext';
-import { api, errorMessage, isAbort } from '../lib/api';
+import { api, isAbort } from '../lib/api';
 import { CATEGORY_INFO } from '../lib/categories';
 import { directionsUrl, googleMapsUrl, openStreetMapUrl } from '../lib/format';
 import type { Place, PlaceDetails } from '../types';
@@ -38,43 +40,55 @@ export default function PlaceDetailsPage() {
   const location = useLocation();
   const { isSaved, toggleSave } = useSavedPlaces();
   const state = (location.state as LinkState | null) ?? {};
+  const activeTrip = useActiveTrip();
 
   // The route numbers only exist when the user came from a journey
   const fromJourney = state.place && state.place.id === id ? state.place : null;
 
   const [details, setDetails] = useState<PlaceDetails | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [settled, setSettled] = useState(false); // the details request is finished (worked or not)
+  const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!id) return;
     const controller = new AbortController();
-    setError(null);
+    const timer = setTimeout(() => controller.abort(), 25000); // never wait forever
+    setFailed(false);
+    setSettled(false);
     setDetails(null);
     api
       .placeDetails(id, controller.signal)
       .then(setDetails)
       .catch((e) => {
-        if (!isAbort(e)) setError(errorMessage(e));
+        if (controller.signal.aborted && !isAbort(e)) return;
+        setFailed(true);
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        setSettled(true);
       });
-    return () => controller.abort();
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [id, attempt]);
 
   // Best information we have right now: full details if loaded, otherwise what the card gave us
   const place: Place | null = details ?? fromJourney;
-  const detailsLoaded = details !== null;
 
   function goBack() {
-    if (state.from) navigate(state.from);
+    // resume: true keeps the trip that was being edited
+    if (state.from) navigate(state.from, { state: { resume: true } });
     else navigate(-1);
   }
 
   if (!place) {
     return (
       <div className="mx-auto max-w-lg px-4 py-24">
-        {error ? (
+        {settled && failed ? (
           <div className="space-y-4">
-            <ErrorBanner message={error} onRetry={() => setAttempt((n) => n + 1)} />
+            <ErrorBanner message="This place could not be loaded right now." onRetry={() => setAttempt((n) => n + 1)} />
             <Link to="/" className="btn-secondary">Back to Explore</Link>
           </div>
         ) : (
@@ -89,6 +103,8 @@ export default function PlaceDetailsPage() {
   // Route numbers: from the full details if present, otherwise from the card we came from
   const routeSource: Place = { ...place, ...(fromJourney ?? {}) };
   const saved = isSaved(place.id);
+  const canEditTrip = Boolean(state.from) && activeTrip.key === state.from;
+  const inTrip = activeTrip.has(place.id);
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
@@ -100,16 +116,7 @@ export default function PlaceDetailsPage() {
         {/* ----- Left: photo, title, description ----- */}
         <div>
           <div className="card overflow-hidden">
-            {place.imageUrl ? (
-              <PlaceImage place={place} className="h-64 w-full sm:h-80" />
-            ) : (
-              <div className="flex h-48 flex-col items-center justify-center gap-2 sm:h-60" style={{ backgroundColor: `${info.color}1f`, color: info.color }}>
-                <Icon className="h-12 w-12" />
-                <span className="flex items-center gap-1.5 text-xs font-semibold opacity-80">
-                  <ImageOff className="h-3.5 w-3.5" /> No photo available on OpenStreetMap
-                </span>
-              </div>
-            )}
+            <PlacePhotos place={place} ready />
           </div>
 
           <div className="mt-6 flex flex-wrap items-center gap-3">
@@ -119,33 +126,6 @@ export default function PlaceDetailsPage() {
           </div>
           <h1 className="mt-3 text-3xl font-extrabold sm:text-4xl">{place.name}</h1>
 
-          <div className="mt-5 text-[15px] leading-relaxed">
-            {!detailsLoaded && !error && <Spinner label="Loading details..." className="justify-start" />}
-            {error && !detailsLoaded && <ErrorBanner tone="warning" message={error} onRetry={() => setAttempt((n) => n + 1)} />}
-            {detailsLoaded && (
-              <>
-                {details.description ? (
-                  <>
-                    <p>{details.description}</p>
-                    <p className="mt-2 text-xs text-muted">
-                      {details.descriptionSource === 'wikipedia' ? (
-                        <>
-                          From Wikipedia
-                          {details.wikipediaUrl && (
-                            <> · <a className="underline" href={details.wikipediaUrl} target="_blank" rel="noreferrer">read more</a></>
-                          )}
-                        </>
-                      ) : (
-                        'From OpenStreetMap'
-                      )}
-                    </p>
-                  </>
-                ) : (
-                  <p className="text-muted">No description is available for this place on OpenStreetMap.</p>
-                )}
-              </>
-            )}
-          </div>
         </div>
 
         {/* ----- Right: actions, route numbers, facts, map ----- */}
@@ -159,17 +139,28 @@ export default function PlaceDetailsPage() {
               <Heart className={`h-4 w-4 ${saved ? 'fill-current' : ''}`} />
               {saved ? 'Saved to favourites' : 'Save to favourites'}
             </button>
-            <a href={directionsUrl(place.latitude, place.longitude)} target="_blank" rel="noreferrer" className="btn-secondary">
+            <a href={directionsUrl(place.latitude, place.longitude)} target="_blank" rel="noreferrer" className="btn-secondary" data-testid="navigate-place">
               <Navigation className="h-4 w-4" /> Navigate
             </a>
           </div>
+          {/* Add to Trip works from here when this page was opened from a journey */}
+          {canEditTrip && (
+            <button
+              onClick={() => activeTrip.toggle(state.from as string, place)}
+              className={inTrip ? 'btn-secondary w-full border-amber-600 text-amber-800' : 'btn-secondary w-full'}
+              aria-pressed={inTrip}
+              data-testid={inTrip ? 'remove-from-trip' : 'add-to-trip'}
+            >
+              {inTrip ? <><Check className="h-4 w-4" /> Added to Trip (Stop {activeTrip.stops.findIndex((s) => s.id === place.id) + 1}) · Remove</> : <><Plus className="h-4 w-4" /> Add to Trip</>}
+            </button>
+          )}
           <a
             href={googleMapsUrl(place.name, place.latitude, place.longitude)}
             target="_blank"
             rel="noreferrer"
             className="btn-secondary w-full"
           >
-            <ExternalLink className="h-4 w-4" /> Open in Google Maps (Google rating and reviews)
+            <ExternalLink className="h-4 w-4" /> Open in Google Maps
           </a>
 
           {routeSource.distanceFromRouteKm !== undefined && (
@@ -200,7 +191,7 @@ export default function PlaceDetailsPage() {
               <div className="text-sm">
                 <p className="font-semibold">Opening hours</p>
                 <p className="whitespace-pre-line text-muted">
-                  {place.openingHours ? place.openingHours.replace(/;\s*/g, '\n') : detailsLoaded ? 'Not available' : 'Loading...'}
+                  {place.openingHours ? place.openingHours.replace(/;\s*/g, '\n') : settled ? 'Opening hours unavailable' : 'Loading…'}
                 </p>
               </div>
             </div>

@@ -159,6 +159,110 @@ describe('accounts, saved places and journeys', { skip: !hasDatabase && 'DATABAS
     assert.equal((await alice.call('GET', `/api/journeys/${journeyId}`)).status, 404);
   });
 
+  // ---- Saved trips (need the SavedTrip migration: npx prisma migrate deploy) ----
+  const tripBody = (stops: typeof place[], extra: Record<string, unknown> = {}) => ({
+    kind: 'journey',
+    origin: { name: 'Mangalore', latitude: 12.9, longitude: 74.8 },
+    destination: { name: 'Goa', latitude: 15.4, longitude: 73.8 },
+    radiusKm: 10,
+    totalDistanceKm: 338,
+    totalDurationMin: 306,
+    drivingDistanceKm: 338,
+    drivingDurationMin: 306,
+    geometry: [[74.8, 12.9], [73.8, 15.4]],
+    stops,
+    ...extra,
+  });
+  const stopA = { ...place, id: 'node-111', name: 'Stop A' };
+  const stopB = { ...place, id: 'node-222', name: 'Stop B' };
+  const stopC = { ...place, id: 'node-333', name: 'Stop C' };
+  const stopD = { ...place, id: 'node-444', name: 'Stop D' };
+
+  test('saved trips: save, list, reopen in the same order, no duplicates, delete', async () => {
+    const alice = new TestClient(base);
+    await alice.call('POST', '/api/auth/register', { name: 'Alice', email: `trip-a-${stamp}@example.com`, password: 'password123' });
+    emails.push(`trip-a-${stamp}@example.com`);
+
+    const saved = await alice.call('POST', '/api/saved-trips', tripBody([stopB, stopA, stopC]));
+    assert.equal(saved.status, 201);
+    const id = saved.json.data.trip.id;
+    assert.deepEqual(saved.json.data.trip.stops.map((s: any) => s.id), ['node-222', 'node-111', 'node-333']);
+
+    // clicking Save twice returns the first save
+    const again = await alice.call('POST', '/api/saved-trips', tripBody([stopB, stopA, stopC]));
+    assert.equal(again.status, 200);
+    assert.equal(again.json.data.alreadySaved, true);
+    assert.equal(again.json.data.trip.id, id);
+
+    const list = await alice.call('GET', '/api/saved-trips');
+    assert.equal(list.json.data.trips.length, 1);
+    const reopened = await alice.call('GET', `/api/saved-trips/${id}`);
+    assert.deepEqual(reopened.json.data.trip.stops.map((s: any) => s.id), ['node-222', 'node-111', 'node-333']);
+    assert.equal(reopened.json.data.trip.totalDistanceKm, 338);
+    assert.equal(reopened.json.data.trip.totalDurationMin, 306);
+    // Navigate link: origin, destination and the three stops in order
+    const url = new URL(reopened.json.data.trip.navigation.legs[0].url);
+    assert.equal(url.searchParams.get('waypoints')!.split('|').length, 3);
+
+    // saving a trip does not create favourites
+    const favourites = await alice.call('GET', '/api/saved-places');
+    assert.equal(favourites.json.data.saved.length, 0);
+
+    const deleted = await alice.call('DELETE', `/api/saved-trips/${id}`);
+    assert.equal(deleted.status, 200);
+    assert.equal((await alice.call('GET', `/api/saved-trips/${id}`)).status, 404);
+  });
+
+  test('saved trips: editing keeps the same id and creation time, and updates the stops', async () => {
+    const alice = new TestClient(base);
+    await alice.call('POST', '/api/auth/login', { email: `trip-a-${stamp}@example.com`, password: 'password123' });
+    const created = await alice.call('POST', '/api/saved-trips', tripBody([stopA, stopB, stopC]));
+    const trip = created.json.data.trip;
+
+    // add D, remove B
+    const edited = await alice.call('PUT', `/api/saved-trips/${trip.id}`, tripBody([stopA, stopC, stopD], { totalDistanceKm: 360, totalDurationMin: 330, drivingDistanceKm: 360, drivingDurationMin: 330 }));
+    assert.equal(edited.status, 200);
+    assert.equal(edited.json.data.trip.id, trip.id);
+    assert.equal(edited.json.data.trip.createdAt, trip.createdAt);
+    assert.ok(new Date(edited.json.data.trip.updatedAt) >= new Date(trip.updatedAt));
+    assert.deepEqual(edited.json.data.trip.stops.map((s: any) => s.id), ['node-111', 'node-333', 'node-444']);
+
+    const list = await alice.call('GET', '/api/saved-trips');
+    assert.equal(list.json.data.trips.length, 1); // no duplicate trip was created
+    const reopened = await alice.call('GET', `/api/saved-trips/${trip.id}`);
+    assert.equal(reopened.json.data.trip.totalDistanceKm, 360);
+    await alice.call('DELETE', `/api/saved-trips/${trip.id}`);
+  });
+
+  test('saved trips: only the owner can view, edit or delete; favourites stay independent', async () => {
+    const alice = new TestClient(base);
+    await alice.call('POST', '/api/auth/login', { email: `trip-a-${stamp}@example.com`, password: 'password123' });
+    const bob = new TestClient(base);
+    await bob.call('POST', '/api/auth/register', { name: 'Bob', email: `trip-b-${stamp}@example.com`, password: 'password123' });
+    emails.push(`trip-b-${stamp}@example.com`);
+
+    const guest = new TestClient(base);
+    assert.equal((await guest.call('GET', '/api/saved-trips')).status, 401);
+
+    const fav = await alice.call('POST', '/api/saved-places', stopA);
+    const trip = (await alice.call('POST', '/api/saved-trips', tripBody([stopA, stopB]))).json.data.trip;
+
+    assert.equal((await bob.call('GET', `/api/saved-trips/${trip.id}`)).status, 404);
+    assert.equal((await bob.call('PUT', `/api/saved-trips/${trip.id}`, tripBody([stopC]))).status, 404);
+    assert.equal((await bob.call('DELETE', `/api/saved-trips/${trip.id}`)).status, 404);
+    assert.equal((await alice.call('GET', `/api/saved-trips/${trip.id}`)).status, 200);
+
+    // removing the favourite leaves the stop in the trip; deleting the trip leaves the favourite
+    await alice.call('DELETE', `/api/saved-places/${fav.json.data.saved.savedId}`);
+    const afterUnfav = await alice.call('GET', `/api/saved-trips/${trip.id}`);
+    assert.ok(afterUnfav.json.data.trip.stops.some((s: any) => s.id === 'node-111'));
+    const fav2 = await alice.call('POST', '/api/saved-places', stopA);
+    await alice.call('DELETE', `/api/saved-trips/${trip.id}`);
+    const favs = await alice.call('GET', '/api/saved-places');
+    assert.equal(favs.json.data.saved.length, 1);
+    await alice.call('DELETE', `/api/saved-places/${fav2.json.data.saved.savedId}`);
+  });
+
   test('input is validated', async () => {
     const guest = new TestClient(base);
     assert.equal((await guest.call('GET', '/api/places/nearby?lat=abc&lon=1')).status, 400);

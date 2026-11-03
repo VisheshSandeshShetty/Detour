@@ -11,6 +11,7 @@ import { AppError } from '../lib/errors';
 import { cacheGet, cacheSet } from '../lib/cache';
 import type { NamedLocation, PlaceDTO, Candidate } from '../types';
 import { getRoute } from './osrm';
+import { DEMO_WARNING } from './demoPlaces';
 import { fetchCorridorCandidates, removeDuplicates } from './overpass';
 import {
   buildRouteIndex,
@@ -141,7 +142,8 @@ async function buildJourneyPlan(request: JourneyRequest): Promise<JourneyPlan> {
       simplifyRoute(stretch, VERTICES_PER_STRETCH)
     );
     const fetched = await fetchCorridorCandidates(stretches, radiusKm + OVERPASS_MARGIN_KM);
-    if (fetched.failedStretches > 0) {
+    if (fetched.demo) warnings.push(DEMO_WARNING);
+    else if (fetched.failedStretches > 0) {
       warnings.push(
         `The places service was busy, so ${fetched.failedStretches} of ${fetched.totalStretches} map sections along the route could not be searched. Results may be incomplete. Try again in a minute.`
       );

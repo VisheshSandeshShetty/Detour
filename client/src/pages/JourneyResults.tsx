@@ -1,7 +1,11 @@
 // "/journey/:id"  Journey Results: the main screen of Detour.
 //
 //   - /journey/new?from=...&to=...   a journey that was just planned (not saved yet)
-//   - /journey/12                    one of the user's saved journeys
+//   - /trip/12                       one of the user's saved trips, opened EDITABLE
+//   - /journey/12                    an older saved journey (from before saved trips existed)
+//
+// The itinerary (which places are selected, in which order) lives in ActiveTripContext. The list, the
+// map markers, Navigate and Save all read it from there, so they always agree.
 //
 // Layout: list + filters on the left, big map on the right (a bottom sheet on phones).
 // The list and the map share one `selectedId`, so clicking either one highlights the other.
@@ -21,6 +25,10 @@ import {
   SearchX,
   SlidersHorizontal,
   ArrowLeft,
+  Check,
+  Link2,
+  ArrowUp,
+  ArrowDown,
 } from 'lucide-react';
 import {
   useEffect,
@@ -37,6 +45,8 @@ import PlaceCard from '../components/PlaceCard';
 import SurpriseRouteModal from '../components/SurpriseRouteModal';
 import SurpriseTrip from '../components/SurpriseTrip';
 import { EmptyState, ErrorBanner } from '../components/ui';
+import NavigateButton from '../components/NavigateButton';
+import { useActiveTrip } from '../context/ActiveTripContext';
 import { useAuth } from '../context/AuthContext';
 import { useSavedPlaces } from '../context/SavedPlacesContext';
 import { ApiError, api, errorMessage, isAbort } from '../lib/api';
@@ -48,7 +58,11 @@ import {
   type JourneySort,
 } from '../lib/filters';
 import { formatDuration, formatKm } from '../lib/format';
-import type { CategoryKey, JourneyPlan, NamedLocation, Place, SurpriseResult } from '../types';
+import type { ThemeKey } from '../lib/themes';
+import { useSurpriseSession } from '../lib/useSurpriseSession';
+import { useSaveSurprise } from '../lib/useSaveSurprise';
+import { buildListSections, estimateRoute, stopNumbers, stopsKey, tripEnds, tripTotals } from '../lib/trip';
+import type { CategoryKey, JourneyPlan, NamedLocation, Place, RouteInfo, SaveTripBody, TripKind, TripStop } from '../types';
 
 type Status = 'loading' | 'error' | 'ready';
 
@@ -112,20 +126,35 @@ export default function JourneyResults() {
   const location = useLocation();
   const { user } = useAuth();
   const { isSaved, toggleSave } = useSavedPlaces();
+  const active = useActiveTrip();
+
+  // Which kind of page this is
+  const isSavedTripPage = location.pathname.startsWith('/trip/');
+  // The address of this page identifies the itinerary that belongs to it
+  const tripKey = location.pathname + location.search;
 
   // ---- Data from the server ----
   const [plan, setPlan] = useState<JourneyPlan | null>(null);
   const [status, setStatus] = useState<Status>('loading');
   const [error, setError] = useState<{ message: string; needsLogin: boolean } | null>(null);
   const [attempt, setAttempt] = useState(0); // bump to try again
-  const [savedJourneyId, setSavedJourneyId] = useState<number | null>(null);
+  const [savedTripId, setSavedTripId] = useState<number | null>(null); // set when this itinerary is a saved trip
+  const [tripKind, setTripKind] = useState<TripKind>('journey');
+  const [tripSettings, setTripSettings] = useState<Record<string, unknown> | null>(null);
+  const [savedStopsKey, setSavedStopsKey] = useState<string | null>(null); // the stops as last saved
+  const [notice, setNotice] = useState<string | null>(null);
+  // The route for the CURRENT stops. `key` says which stops it was calculated for.
+  const [routeState, setRouteState] = useState<{ key: string; route: RouteInfo; estimated: boolean } | null>(null);
+
+  // The itinerary: single source of truth for selection, order, markers, Navigate and Save
+  const stops: TripStop[] = active.key === tripKey ? active.stops : [];
+  const currentKey = stopsKey(stops);
 
   // ---- What the user is doing ----
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filters, setFilters] = useState<JourneyFilters>(EMPTY_JOURNEY_FILTERS);
   const [sort, setSort] = useState<JourneySort>('extraDistance');
   const [showFilters, setShowFilters] = useState(false);
-  const [tripIds, setTripIds] = useState<string[]>([]); // places added to "my trip", in order
   const [sheetOpen, setSheetOpen] = useState(false); // phone bottom sheet
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -133,11 +162,24 @@ export default function JourneyResults() {
 
   // ---- Surprise Me along this route ----
   const [surpriseOpen, setSurpriseOpen] = useState(false); // the popup asking for time/distance
-  const [surprise, setSurprise] = useState<SurpriseResult | null>(null); // the chosen trip, if any
-  const [lastLimits, setLastLimits] = useState<{ totalMin: number | null; maxTotalKm: number | null; breakMin: number } | null>(null);
-  const [shuffling, setShuffling] = useState(false);
-  const [shuffleError, setShuffleError] = useState<string | null>(null);
-  const [surpriseCount, setSurpriseCount] = useState(0); // makes the map re-frame for each new trip
+  const [surpriseThemes, setSurpriseThemes] = useState<ThemeKey[]>([]); // kinds of place, empty = anything
+  const [lastLimits, setLastLimits] = useState<{ totalMin: number | null; maxTotalKm: number | null } | null>(null);
+  const [linkCopied, setLinkCopied] = useState(false);
+  const [surpriseCount, setSurpriseCount] = useState(0);
+  const surpriseSaver = useSaveSurprise(plan?.radiusKm ?? null);
+  // One Surprise session: remembers what was shown, so Roll Again never repeats a place
+  const surpriseSession = useSurpriseSession(async (excludeIds) => {
+    if (!plan || !lastLimits) throw new Error('Choose your time or distance first.');
+    return api.surpriseRoute({
+      origin: plan.origin,
+      destination: plan.destination,
+      radiusKm: plan.radiusKm,
+      ...lastLimits,
+      themes: surpriseThemes,
+      excludeIds,
+    });
+  });
+  const surprise = surpriseSession.result; // makes the map re-frame for each new trip
 
   // ---- Load the journey ----
   const query = searchParams.toString();
@@ -148,27 +190,72 @@ export default function JourneyResults() {
     setPlan(null);
     setSelectedId(null);
     setFilters(EMPTY_JOURNEY_FILTERS);
-    setSavedJourneyId(null);
-    setSurprise(null);
+    setSavedTripId(null);
+    setSavedStopsKey(null);
+    setRouteState(null);
+    setNotice(null);
+    setTripKind('journey');
+    setTripSettings(null);
+    surpriseSession.clear();
     setLastLimits(null);
+
+    // Coming back from Place Details keeps the itinerary being edited; a fresh visit starts from the saved data
+    const keepEditedStops = active.key === tripKey && active.stops.length > 0 && !isSavedTripPage;
 
     async function load() {
       try {
         if (id === 'new') {
           const request = readRequestFromUrl(new URLSearchParams(query));
           if (!request) throw new ApiError('This journey link is incomplete. Please plan the journey again.', 400);
-          setTripIds([]);
-          setPlan(await api.planJourney(request.origin, request.destination, request.radiusKm, controller.signal));
+          const loaded = await api.planJourney(request.origin, request.destination, request.radiusKm, controller.signal);
+          if (!keepEditedStops) active.reset(tripKey, []);
+          setPlan(loaded);
+          setRouteState({ key: '', route: loaded.route, estimated: false });
+        } else if (isSavedTripPage) {
+          const tripId = Number(id);
+          if (!Number.isInteger(tripId) || tripId <= 0) throw new ApiError('That trip link is not valid.', 404);
+          // The saved trip is the source of truth for origin, destination, stops, order and route
+          const trip = await api.getTrip(tripId, controller.signal);
+          // Fresh discovery along the route is only an extra: if it fails, the saved trip still opens
+          let discovered: JourneyPlan | null = null;
+          if (trip.kind !== 'surprise-around') {
+            try {
+              discovered = await api.planJourney(trip.origin, trip.destination, trip.radiusKm ?? 10, controller.signal);
+            } catch (e) {
+              if (controller.signal.aborted || isAbort(e)) return;
+            }
+          }
+          const keepEdits = active.key === tripKey && active.stops.length > 0 && location.state && (location.state as { resume?: boolean }).resume;
+          if (!keepEdits) active.reset(tripKey, trip.stops);
+          const geometry = trip.geometry ?? [];
+          const route: RouteInfo = { distanceKm: trip.drivingDistanceKm, durationMin: trip.drivingDurationMin, geometry };
+          setSavedTripId(trip.id);
+          setTripKind(trip.kind);
+          setTripSettings(trip.settings);
+          setSavedStopsKey(stopsKey(trip.stops));
+          setPlan({
+            origin: trip.origin,
+            destination: trip.destination,
+            radiusKm: trip.radiusKm ?? 10,
+            route,
+            attractions: discovered?.attractions ?? [],
+            totalInCorridor: discovered?.totalInCorridor ?? 0,
+            warnings: discovered ? discovered.warnings : [],
+          });
+          // A trip saved without a route line gets its line recalculated (key '?' never matches)
+          setRouteState({ key: geometry.length > 1 ? stopsKey(trip.stops) : '?', route, estimated: false });
         } else {
+          // An older saved journey (made before "saved trips"): open it, and Save turns it into a saved trip
           const journeyId = Number(id);
           if (!Number.isInteger(journeyId) || journeyId <= 0) throw new ApiError('That journey link is not valid.', 404);
           const [journey, loadedPlan] = await Promise.all([
             api.getJourney(journeyId, controller.signal),
             api.journeyPlan(journeyId, controller.signal),
           ]);
-          setSavedJourneyId(journey.id);
-          setTripIds(journey.stops.map((stop) => stop.place.id));
+          active.reset(tripKey, journey.stops.map((stop) => stop.place));
           setPlan(loadedPlan);
+          setRouteState({ key: '?', route: loadedPlan.route, estimated: false });
+          setNotice('This journey was saved before saved trips existed. Press Save Trip to keep it as an editable trip.');
         }
         setStatus('ready');
       } catch (e) {
@@ -179,12 +266,51 @@ export default function JourneyResults() {
     }
     load();
     return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, query, attempt]);
 
-  // ---- Filtering (in the browser, on the results we already have) ----
-  const visiblePlaces = useMemo(
-    () => (plan ? filterAndSortJourney(plan.attractions, filters, sort) : []),
-    [plan, filters, sort]
+  // ---- Keep the route, distance and time in step with the stops ----
+  // Whenever the stops change, ask for the real driving route through them (after a short pause, so
+  // a quick series of clicks makes one request).
+  const [routeUpdating, setRouteUpdating] = useState(false);
+  useEffect(() => {
+    if (!plan || !routeState || routeState.key === currentKey) {
+      setRouteUpdating(false);
+      return;
+    }
+    const controller = new AbortController();
+    setRouteUpdating(true);
+    const timer = setTimeout(async () => {
+      const { via, end } = tripEnds(tripKind, tripSettings, plan.origin, plan.destination, stops);
+      try {
+        const route = await api.routeThrough(plan.origin, via, end, controller.signal);
+        setRouteState({ key: currentKey, route, estimated: false });
+      } catch (e) {
+        if (controller.signal.aborted || isAbort(e)) return;
+        // Routing service busy: show an estimate and say so (the old line stays on the map)
+        const estimate = estimateRoute({ distanceKm: plan.route.distanceKm, durationMin: plan.route.durationMin }, stops);
+        setRouteState((previous) => ({ key: currentKey, route: { ...estimate, geometry: previous?.route.geometry ?? plan.route.geometry }, estimated: true }));
+      } finally {
+        if (!controller.signal.aborted) setRouteUpdating(false);
+      }
+    }, 450);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plan, currentKey, routeState?.key, tripKind]);
+
+  const route: RouteInfo = routeState?.route ?? plan?.route ?? { distanceKm: 0, durationMin: 0, geometry: [] };
+  const totals = tripTotals(route, stops, tripKind);
+  const numbers = useMemo(() => stopNumbers(stops), [stops]);
+  const ends = plan ? tripEnds(tripKind, tripSettings, plan.origin, plan.destination, stops) : null;
+  const dirty = savedTripId === null || savedStopsKey !== currentKey;
+
+  // ---- The list: selected stops first (in trip order), then everything else, filtered and sorted ----
+  const sections = useMemo(
+    () => buildListSections(plan?.attractions ?? [], stops, (others) => filterAndSortJourney(others, filters, sort)),
+    [plan, stops, filters, sort]
   );
   const categoryCounts = useMemo(() => {
     const counts: Partial<Record<CategoryKey, number>> = {};
@@ -194,11 +320,13 @@ export default function JourneyResults() {
   const filtersActive =
     filters.categories.length > 0 || filters.query !== '' || filters.maxExtraKm !== null ||
     filters.maxExtraMin !== null;
+  // The map shows every selected stop (numbered) plus the places that pass the filters
+  const mapPlaces = useMemo(() => [...sections.selected, ...sections.others], [sections]);
 
   // The map needs [lat, lon]; the server sends [lon, lat]
   const routeLatLng = useMemo(
-    () => plan?.route.geometry.map(([lon, lat]) => [lat, lon] as [number, number]),
-    [plan]
+    () => route.geometry.map(([lon, lat]) => [lat, lon] as [number, number]),
+    [route]
   );
   // While a surprise trip is shown, the map draws its stops and its own line (through the stops)
   const surpriseLatLng = useMemo(
@@ -206,7 +334,7 @@ export default function JourneyResults() {
     [surprise]
   );
   // Changes only when a new journey arrives, so filtering never re-frames the map
-  const fitKey = plan ? `${plan.origin.latitude},${plan.origin.longitude}-${plan.destination.latitude},${plan.destination.longitude}-${plan.radiusKm}-${attempt}-${surpriseCount}` : 'none';
+  const fitKey = plan ? `${plan.origin.latitude},${plan.origin.longitude}-${plan.destination.latitude},${plan.destination.longitude}-${plan.radiusKm}-${attempt}-${surpriseCount}-${savedTripId ?? 'new'}` : 'none';
 
   // ---- Selecting ----
   function selectPlace(placeId: string | null) {
@@ -265,53 +393,79 @@ export default function JourneyResults() {
     savePanelWidth(PANEL_DEFAULT);
   }
 
-  // "Shuffle again": ask for another random trip with the same limits as before
-  async function shuffleSurprise() {
-    if (!plan || !lastLimits) {
-      setSurpriseOpen(true);
-      return;
-    }
-    setShuffling(true);
-    setShuffleError(null);
+  // Share link. A freshly planned journey's address holds the whole request, so anyone can open it.
+  // A saved journey is private to its owner, so there we share the same journey as a new plan.
+  async function copyLink() {
+    if (!plan) return;
+    const params = new URLSearchParams({
+      from: plan.origin.name,
+      fromLat: String(plan.origin.latitude),
+      fromLon: String(plan.origin.longitude),
+      to: plan.destination.name,
+      toLat: String(plan.destination.latitude),
+      toLon: String(plan.destination.longitude),
+      radius: String(plan.radiusKm),
+    });
+    const url = `${window.location.origin}/journey/new?${params.toString()}`;
     try {
-      const result = await api.surpriseRoute({
-        origin: plan.origin,
-        destination: plan.destination,
-        radiusKm: plan.radiusKm,
-        ...lastLimits,
-      });
-      setSurprise(result);
-      setSelectedId(null);
-      setSurpriseCount((n) => n + 1);
-    } catch (e) {
-      setShuffleError(errorMessage(e));
-    } finally {
-      setShuffling(false);
+      await navigator.clipboard.writeText(url);
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 2000);
+    } catch {
+      window.prompt('Copy this link:', url); // clipboard blocked: let the user copy it by hand
     }
   }
 
   function toggleTrip(place: Place) {
-    if (savedJourneyId !== null) return; // a saved journey's stops are fixed
-    setTripIds((ids) => (ids.includes(place.id) ? ids.filter((x) => x !== place.id) : [...ids, place.id]));
+    active.toggle(tripKey, place);
   }
 
-  // ---- Saving the journey ----
+  // ---- Saving the journey (new trip, or the SAME trip when editing a saved one) ----
+  function tripBodyNow(): SaveTripBody {
+    const p = plan as JourneyPlan;
+    const body: SaveTripBody = {
+      kind: tripKind,
+      origin: p.origin,
+      destination: p.destination,
+      radiusKm: tripKind === 'surprise-around' ? null : p.radiusKm,
+      totalDistanceKm: route.distanceKm,
+      totalDurationMin: totals.totalMin,
+      drivingDistanceKm: route.distanceKm,
+      drivingDurationMin: route.durationMin,
+      geometry: route.geometry.length > 1 && route.geometry.length <= 6000 ? route.geometry : null,
+      stops,
+      settings: tripSettings,
+    };
+    // A one-way surprise trip ends at its last stop, so keep that as the destination
+    if (ends && tripKind === 'surprise-around') body.destination = ends.end;
+    return body;
+  }
+
   async function saveJourney() {
     if (!plan) return;
     if (!user) {
-      navigate('/login', { state: { from: location.pathname + location.search, message: 'Log in to save this journey.' } });
+      navigate('/login', { state: { from: location.pathname + location.search, message: 'Log in to save this trip.' } });
+      return;
+    }
+    if (routeUpdating) {
+      setSaveError('The route is still being updated for your latest change. Try again in a moment.');
       return;
     }
     setSaving(true);
     setSaveError(null);
     try {
-      const stops = tripIds
-        .map((tripId) => plan.attractions.find((place) => place.id === tripId))
-        .filter((place): place is Place => place !== undefined);
-      const saved = await api.saveJourney(plan, stops);
-      navigate(`/journey/${saved.id}`, { replace: true });
+      if (savedTripId !== null) {
+        await api.updateTrip(savedTripId, tripBodyNow());
+        setSavedStopsKey(currentKey);
+        setNotice('Changes saved to this trip.');
+      } else {
+        const { trip, alreadySaved } = await api.saveTrip(tripBodyNow());
+        // Move to the saved trip's own page: it is loaded from the database, exactly as it will reopen later
+        navigate(`/trip/${trip.id}`, { replace: true, state: { saved: true, alreadySaved } });
+      }
     } catch (e) {
       setSaveError(errorMessage(e));
+    } finally {
       setSaving(false);
     }
   }
@@ -376,7 +530,7 @@ export default function JourneyResults() {
           <span className="h-1 w-10 rounded-full bg-line" />
           <span className="flex items-center gap-1 text-[11px] font-semibold text-muted">
             {sheetOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
-            {visiblePlaces.length} places
+            {sections.selected.length + sections.others.length} places
           </span>
         </button>
 
@@ -388,12 +542,22 @@ export default function JourneyResults() {
                 {plan.origin.name} <span className="text-forest-600">→</span> {plan.destination.name}
               </h1>
               <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
-                <span className="inline-flex items-center gap-1"><Route className="h-3.5 w-3.5" />{formatKm(plan.route.distanceKm)}</span>
-                <span className="inline-flex items-center gap-1"><Clock className="h-3.5 w-3.5" />{formatDuration(plan.route.durationMin)}</span>
-                <span className="inline-flex items-center gap-1"><MapPin className="h-3.5 w-3.5" />{plan.radiusKm} km corridor</span>
+                <span className="inline-flex items-center gap-1" data-testid="trip-distance"><Route className="h-3.5 w-3.5" />{formatKm(route.distanceKm)}</span>
+                <span className="inline-flex items-center gap-1" data-testid="trip-duration"><Clock className="h-3.5 w-3.5" />{formatDuration(totals.totalMin)}{tripKind !== 'journey' && totals.visitMin > 0 ? ' incl. visits' : ''}</span>
+                {tripKind !== 'surprise-around' && <span className="inline-flex items-center gap-1"><MapPin className="h-3.5 w-3.5" />{plan.radiusKm} km corridor</span>}
+                {routeUpdating && <span className="inline-flex items-center gap-1 text-forest-700"><Loader2 className="h-3 w-3 animate-spin" />Updating route…</span>}
+                {routeState?.estimated && !routeUpdating && <span title="The routing service was busy, so distance and time are estimates">≈ estimate</span>}
               </div>
             </div>
             <div className="flex shrink-0 gap-1.5">
+              <button
+                className="btn-secondary btn-sm"
+                onClick={copyLink}
+                aria-label="Copy link to this journey"
+                title={linkCopied ? 'Link copied!' : 'Copy link to this journey'}
+              >
+                {linkCopied ? <Check className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
+              </button>
               <button
                 className="btn-secondary btn-sm"
                 onClick={() => navigate('/journey', { state: { origin: plan.origin, destination: plan.destination, radiusKm: plan.radiusKm } })}
@@ -402,28 +566,37 @@ export default function JourneyResults() {
               >
                 <Pencil className="h-3.5 w-3.5" />
               </button>
-              {savedJourneyId === null ? (
-                <button className="btn-primary btn-sm" onClick={saveJourney} disabled={saving}>
-                  {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Bookmark className="h-3.5 w-3.5" />}
-                  Save
-                </button>
-              ) : (
-                <span className="btn-secondary btn-sm pointer-events-none text-forest-800">
-                  <BookmarkCheck className="h-3.5 w-3.5" /> Saved
-                </span>
-              )}
             </div>
           </div>
 
-          <p className="text-xs text-muted">
-            <strong className="text-ink">{plan.attractions.length}</strong> places found along the route
-            {plan.totalInCorridor > plan.attractions.length && (
-              <> (the best {plan.attractions.length} of {plan.totalInCorridor} in the corridor)</>
-            )}
-            {tripIds.length > 0 && (
-              <> · <strong className="text-forest-800">{tripIds.length}</strong> in your trip</>
-            )}
-          </p>
+          {/* The three separate actions: Navigate (open in Google Maps), Save Trip, and (on the Saved page) Open Trip */}
+          {!surprise && ends && (
+            <div className="flex flex-wrap items-center gap-2">
+              <NavigateButton start={plan.origin} stops={ends.via} end={ends.end} label="Navigate" className="btn-primary btn-sm" />
+              <button
+                className={dirty ? 'btn-secondary btn-sm border-forest-500' : 'btn-secondary btn-sm pointer-events-none text-forest-800'}
+                onClick={saveJourney}
+                disabled={saving || (!dirty)}
+                data-testid="save-trip"
+              >
+                {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : dirty ? <Bookmark className="h-3.5 w-3.5" /> : <BookmarkCheck className="h-3.5 w-3.5" />}
+                {savedTripId === null ? 'Save Trip' : dirty ? 'Save changes' : 'Saved'}
+              </button>
+              {stops.length > 0 && (
+                <span className="text-xs font-semibold text-amber-800" data-testid="trip-count">{stops.length} in your trip</span>
+              )}
+            </div>
+          )}
+
+          {tripKind !== 'surprise-around' && (
+            <p className="text-xs text-muted">
+              <strong className="text-ink">{plan.attractions.length}</strong> places found along the route
+              {plan.totalInCorridor > plan.attractions.length && (
+                <> (the best {plan.attractions.length} of {plan.totalInCorridor} in the corridor)</>
+              )}
+            </p>
+          )}
+          {notice && <p className="rounded-lg bg-forest-50 px-3 py-2 text-xs text-forest-900">{notice}</p>}
 
           {saveError && <ErrorBanner message={saveError} />}
           {plan.warnings.map((warning) => (
@@ -433,18 +606,31 @@ export default function JourneyResults() {
 
         {surprise ? (
           <div className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-paper/60 p-3">
-            <button className="btn-ghost btn-sm" onClick={() => { setSurprise(null); setSurpriseCount((n) => n + 1); setSelectedId(null); }}>
+            <button className="btn-ghost btn-sm" onClick={() => { surpriseSession.clear(); setSurpriseCount((n) => n + 1); setSelectedId(null); }}>
               <ArrowLeft className="h-3.5 w-3.5" /> Back to all places
             </button>
             <SurpriseTrip
               result={surprise}
               selectedId={selectedId}
               onSelect={selectPlace}
-              onShuffle={shuffleSurprise}
-              shuffling={shuffling}
+              onRoll={() => {
+                setSelectedId(null);
+                void surpriseSession.rollAgain();
+              }}
+              rolling={surpriseSession.rolling}
+              canGoBack={surpriseSession.canGoBack}
+              canGoForward={surpriseSession.canGoForward}
+              onBack={surpriseSession.back}
+              onForward={surpriseSession.forward}
+              failure={surpriseSession.failure}
+              onStartOver={() => void surpriseSession.startNew()}
+              rollKey={surpriseSession.rollKey}
               fromPath={fromPath}
+              onSave={() => void surpriseSaver.save(surprise)}
+              saving={surpriseSaver.saving}
+              savedTripId={surpriseSaver.savedIdFor(surprise)}
+              saveError={surpriseSaver.error}
             />
-            {shuffleError && <ErrorBanner message={shuffleError} />}
           </div>
         ) : (
           <>
@@ -518,7 +704,33 @@ export default function JourneyResults() {
 
         {/* The list of places */}
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-paper/60 p-3">
-          {visiblePlaces.length === 0 ? (
+          {stops.length > 0 && (
+            <div data-testid="trip-section" className="space-y-3">
+              <h2 className="flex items-center justify-between text-xs font-extrabold uppercase tracking-wide text-amber-800">
+                <span>Your trip · {stops.length} {stops.length === 1 ? 'stop' : 'stops'}</span>
+              </h2>
+              {sections.selected.map((place, index) => (
+                <PlaceCard
+                  key={place.id}
+                  place={place}
+                  selected={place.id === selectedId}
+                  onSelect={selectPlace}
+                  saved={isSaved(place.id)}
+                  onToggleSave={toggleSave}
+                  inTrip
+                  tripNumber={index + 1}
+                  onToggleTrip={toggleTrip}
+                  onMove={(direction) => active.move(tripKey, place.id, direction)}
+                  canMoveUp={index > 0}
+                  canMoveDown={index < sections.selected.length - 1}
+                  fromPath={fromPath}
+                />
+              ))}
+              {sections.others.length > 0 && <hr className="border-line" />}
+            </div>
+          )}
+
+          {sections.others.length === 0 && stops.length === 0 ? (
             <EmptyState
               icon={SearchX}
               title={plan.attractions.length === 0 ? 'No places found along this route' : 'No places match your filters'}
@@ -536,7 +748,7 @@ export default function JourneyResults() {
               }
             />
           ) : (
-            visiblePlaces.map((place) => (
+            sections.others.map((place) => (
               <PlaceCard
                 key={place.id}
                 place={place}
@@ -544,8 +756,8 @@ export default function JourneyResults() {
                 onSelect={selectPlace}
                 saved={isSaved(place.id)}
                 onToggleSave={toggleSave}
-                inTrip={tripIds.includes(place.id)}
-                onToggleTrip={savedJourneyId === null ? toggleTrip : undefined}
+                inTrip={false}
+                onToggleTrip={toggleTrip}
                 fromPath={fromPath}
               />
             ))
@@ -553,7 +765,7 @@ export default function JourneyResults() {
         </div>
 
             {/* The Surprise Me card, at the bottom of the list */}
-            {(
+            {tripKind !== 'surprise-around' && (
               <div className={`${sheetOpen ? '' : 'hidden md:block'} shrink-0 border-t border-line bg-forest-50 px-4 py-3`}>
                 <p className="text-sm font-extrabold">Want to make this trip more interesting?</p>
                 <p className="mt-0.5 text-xs text-muted">Discover unexpected places along your journey.</p>
@@ -587,24 +799,27 @@ export default function JourneyResults() {
       {/* ---------- Map ---------- */}
       <div className="absolute inset-0 isolate md:relative md:inset-auto md:h-full md:min-w-0 md:flex-1">
         <MapView
-          places={surprise ? surprise.stops : visiblePlaces}
+          places={surprise ? surprise.stops : mapPlaces}
+          stopNumbers={surprise ? stopNumbers(surprise.stops) : numbers}
           selectedId={selectedId}
           onSelect={selectPlace}
           route={surprise ? surpriseLatLng ?? routeLatLng : routeLatLng}
           origin={plan.origin}
-          destination={plan.destination}
+          destination={ends?.end ?? plan.destination}
           fitKey={fitKey}
           fromPath={fromPath}
         />
       </div>
 
-      {surpriseOpen && (
+      {surpriseOpen && tripKind !== 'surprise-around' && (
         <SurpriseRouteModal
           plan={plan}
           onClose={() => setSurpriseOpen(false)}
+          themes={surpriseThemes}
+          onThemesChange={setSurpriseThemes}
           onResult={(result, limits) => {
             setLastLimits(limits);
-            setSurprise(result);
+            surpriseSession.adopt(result);
             setSurpriseOpen(false);
             setSelectedId(null);
             setSurpriseCount((n) => n + 1);

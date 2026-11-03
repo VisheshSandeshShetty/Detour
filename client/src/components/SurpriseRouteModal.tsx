@@ -1,35 +1,31 @@
 // The popup behind "Surprise Me Along This Route". It asks for the total trip time and/or the
 // total distance, shows the reserved break, then asks the server for random stops along the route.
 
-import { Loader2, Pause, Sparkles, X } from 'lucide-react';
+import { Loader2, Sparkles, X } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
 import { api, errorMessage } from '../lib/api';
 import { formatDuration, formatKm } from '../lib/format';
+import type { ThemeKey } from '../lib/themes';
 import type { JourneyPlan, SurpriseResult } from '../types';
+import SurpriseFilter, { FilterSummary } from './SurpriseFilter';
 import SurpriseLimits, { readLimits } from './SurpriseLimits';
 import { ErrorBanner } from './ui';
-
-const FALLBACK_BREAK_MIN = 90; // used only if the server cannot be asked
 
 interface Props {
   plan: JourneyPlan;
   onClose: () => void;
-  onResult: (result: SurpriseResult, limits: { totalMin: number | null; maxTotalKm: number | null; breakMin: number }) => void;
+  themes: ThemeKey[]; // kept by the page, so Roll Again uses the same kinds
+  onThemesChange: (themes: ThemeKey[]) => void;
+  onResult: (result: SurpriseResult, limits: { totalMin: number | null; maxTotalKm: number | null }) => void;
 }
 
-export default function SurpriseRouteModal({ plan, onClose, onResult }: Props) {
+export default function SurpriseRouteModal({ plan, onClose, onResult, themes, onThemesChange }: Props) {
   const direct = plan.route;
   // Start with something sensible: the direct trip plus about 30% (distance) and an extra 2 hours (time)
   const [hours, setHours] = useState(String(Math.ceil((direct.durationMin + 120) / 30) / 2));
   const [km, setKm] = useState(String(Math.ceil((direct.distanceKm * 1.15) / 10) * 10));
-  const [breakMin, setBreakMin] = useState(FALLBACK_BREAK_MIN);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // The break length lives on the server, so the app and the server always agree on it
-  useEffect(() => {
-    api.surpriseSettings().then((s) => setBreakMin(s.breakMin)).catch(() => undefined);
-  }, []);
 
   // Escape closes the popup
   useEffect(() => {
@@ -54,9 +50,10 @@ export default function SurpriseRouteModal({ plan, onClose, onResult }: Props) {
         radiusKm: plan.radiusKm,
         totalMin: limits.timeMin,
         maxTotalKm: limits.km,
-        breakMin,
+        themes,
+        excludeIds: [], // a new surprise starts a new session
       });
-      onResult(result, { totalMin: limits.timeMin, maxTotalKm: limits.km, breakMin });
+      onResult(result, { totalMin: limits.timeMin, maxTotalKm: limits.km });
     } catch (e) {
       setError(errorMessage(e));
       setLoading(false);
@@ -91,24 +88,22 @@ export default function SurpriseRouteModal({ plan, onClose, onResult }: Props) {
           kmLabel="Total distance (km)"
           idPrefix="route"
         />
-        <p className="-mt-2 text-xs text-muted">
-          Total means the whole trip, including the surprise detours. Fill one or both.
-        </p>
-
-        <div className="flex items-start gap-2 rounded-xl border border-line px-3 py-2 text-sm">
-          <Pause className="mt-0.5 h-4 w-4 shrink-0 text-forest-700" />
-          <div>
-            <p className="font-bold">Reserved break: {formatDuration(breakMin)}</p>
-            <p className="text-xs text-muted">For rest, food and fuel. This is not exploration time, so it is taken out of your total time before choosing places.</p>
-          </div>
+        <div className="-mt-2 space-y-1 text-xs text-muted">
+          <p><strong className="text-ink">Total trip time:</strong> Includes driving, breaks and time spent visiting attractions.</p>
+          <p><strong className="text-ink">Total distance:</strong> Includes the driving route and detours required to visit selected attractions.</p>
+          <p>Fill one or both. The whole trip stays inside every limit you give.</p>
         </div>
 
         {error && <ErrorBanner message={error} />}
 
-        <button className="btn-primary w-full py-3" type="submit" disabled={loading}>
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-          {loading ? 'Finding surprises…' : 'Surprise me'}
-        </button>
+        <div className="flex gap-2">
+          <button className="btn-primary flex-1 py-3" type="submit" disabled={loading}>
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+            {loading ? 'Finding surprises…' : 'Surprise me'}
+          </button>
+          <SurpriseFilter selected={themes} onChange={onThemesChange} disabled={loading} />
+        </div>
+        <FilterSummary selected={themes} onChange={onThemesChange} />
       </form>
     </div>
   );

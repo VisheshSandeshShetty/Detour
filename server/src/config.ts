@@ -2,6 +2,8 @@
 // Everything else in the server imports `config` instead of touching process.env directly.
 
 import 'dotenv/config';
+import os from 'node:os';
+import path from 'node:path';
 
 function numberFromEnv(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -30,6 +32,10 @@ export const config = {
     .split(',')
     .map((url) => url.trim())
     .filter(Boolean),
+  // Downloaded map tiles are also saved in this file, so they survive a server restart.
+  // Set TILE_CACHE_FILE= (empty) to turn it off. The default is in the system temp folder, not in
+  // the project, so it never ends up in OneDrive or GitHub.
+  tileCacheFile: process.env.TILE_CACHE_FILE ?? path.join(os.tmpdir(), 'detour-tile-cache.json'),
   photonUrl: (process.env.PHOTON_URL ?? 'https://photon.komoot.io').replace(/\/+$/, ''),
   // Overpass asks every app to identify itself with a unique User-Agent. Set CONTACT_EMAIL in .env.
   userAgent: process.env.CONTACT_EMAIL
@@ -38,8 +44,5 @@ export const config = {
 
   maxRouteKm: numberFromEnv('MAX_ROUTE_KM', 1200),
 
-  // Surprise Me: minutes reserved for rest, food and fuel on a route trip. NOT sightseeing time.
-  // Change the default here (or with SURPRISE_BREAK_MIN in .env). Requests may override it.
-  surpriseBreakMin: numberFromEnv('SURPRISE_BREAK_MIN', 90),
   osrmDelayMs: numberFromEnv('OSRM_DELAY_MS', 500),
 };

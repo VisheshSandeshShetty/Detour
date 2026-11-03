@@ -11,6 +11,7 @@ import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 import authRoutes from './routes/auth';
 import geocodeRoutes from './routes/geocode';
 import journeyRoutes from './routes/journeys';
+import savedTripRoutes from './routes/savedTrips';
 import placeRoutes from './routes/places';
 import savedPlaceRoutes from './routes/savedPlaces';
 import surpriseRoutes from './routes/surprise';
@@ -45,6 +46,7 @@ export function createApp() {
   app.use('/api/geocode', geocodeRoutes);
   app.use('/api/places', placeRoutes);
   app.use('/api/journeys', journeyRoutes);
+  app.use('/api/saved-trips', savedTripRoutes);
   app.use('/api/saved-places', savedPlaceRoutes);
   app.use('/api/surprise', surpriseRoutes);
   app.use('/api', notFoundHandler);

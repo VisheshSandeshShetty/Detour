@@ -177,20 +177,20 @@ describe('Surprise Me end to end (fake OSRM and Overpass)', () => {
     );
   });
 
-  test('along a route: stays inside the total distance and reserves the 90 minute break', async () => {
+  test('along a route: stays inside the total distance and has no reserved break', async () => {
     cacheClear();
     extraPerWaypointM = 0;
     // the direct trip is about 133 km on the fake roads
     const result = await surpriseRoute(
-      { origin, destination, radiusKm: 10, maxTotalKm: 160, totalMin: null, breakMin: 90 },
+      { origin, destination, radiusKm: 10, maxTotalKm: 160, totalMin: null },
       seeded(1)
     );
     assert.equal(result.mode, 'route');
     assert.ok(result.stops.length >= 1 && result.stops.length <= 5);
     assert.ok(result.summary.drivingKm <= 160, `driving km: ${result.summary.drivingKm}`);
     assert.ok(result.summary.directKm! > 125 && result.summary.directKm! < 140, `direct km: ${result.summary.directKm}`);
-    assert.equal(result.summary.breakMin, 90);
-    assert.ok(Math.abs(result.summary.drivingMin + result.summary.visitMin + 90 - result.summary.totalMin) <= 1);
+    assert.equal(result.summary.breakMin, 0);
+    assert.ok(Math.abs(result.summary.drivingMin + result.summary.visitMin - result.summary.totalMin) <= 1);
     assert.ok(result.geometry && result.geometry.length > 10);
 
     // in driving order, spread out, and with the detour numbers from the planner
@@ -200,36 +200,32 @@ describe('Surprise Me end to end (fake OSRM and Overpass)', () => {
     assert.ok(result.stops.every((stop) => typeof stop.detourDistanceKm === 'number' && typeof stop.detourDurationMin === 'number'));
   });
 
-  test('along a route: the time budget includes the reserved break', async () => {
+  test('along a route: the entered total time is the WHOLE trip (driving + visits), nothing added on top', async () => {
     cacheClear();
     extraPerWaypointM = 0;
-    // Direct drive is about 139 min. 139 + 90 (break) + 60 spare = 290 minutes.
-    const result = await surpriseRoute(
-      { origin, destination, radiusKm: 10, maxTotalKm: null, totalMin: 290, breakMin: 90 },
-      seeded(2)
-    );
+    // Direct drive is about 139 min, so 290 minutes leaves about 150 minutes for detours and visits
+    const result = await surpriseRoute({ origin, destination, radiusKm: 10, maxTotalKm: null, totalMin: 290 }, seeded(2));
     assert.ok(result.summary.totalMin <= 291, `total min: ${result.summary.totalMin}`);
-    assert.ok(result.summary.visitMin <= 60, `visiting: ${result.summary.visitMin}`);
-    assert.equal(result.summary.breakMin, 90);
+    assert.equal(result.summary.breakMin, 0);
+    // no double counting: total = driving + visits exactly (each counted once)
+    assert.ok(Math.abs(result.summary.drivingMin + result.summary.visitMin - result.summary.totalMin) <= 1);
+    assert.equal(result.summary.visitMin, result.stops.reduce((sum, stop) => sum + stop.visitMin, 0));
+    assert.ok(result.summary.visitMin <= 290 - result.summary.directMin! + 1);
   });
 
-  test('along a route: the break length can be changed', async () => {
+  test('along a route: entering both limits keeps the trip inside BOTH', async () => {
     cacheClear();
     extraPerWaypointM = 0;
-    const result = await surpriseRoute(
-      { origin, destination, radiusKm: 10, maxTotalKm: null, totalMin: 290, breakMin: 30 },
-      seeded(2)
-    );
-    assert.equal(result.summary.breakMin, 30);
-    // with a shorter break there is more room for sightseeing
-    assert.ok(result.summary.visitMin <= 120);
+    const result = await surpriseRoute({ origin, destination, radiusKm: 10, maxTotalKm: 170, totalMin: 300 }, seeded(4));
+    assert.ok(result.summary.drivingKm <= 170);
+    assert.ok(result.summary.totalMin <= 301);
   });
 
   test('along a route: if the real trip is longer than the estimate, stops are dropped until it fits', async () => {
     cacheClear();
     extraPerWaypointM = 15000; // pretend every stop adds 15 km of winding road
     const result = await surpriseRoute(
-      { origin, destination, radiusKm: 10, maxTotalKm: 160, totalMin: null, breakMin: 90 },
+      { origin, destination, radiusKm: 10, maxTotalKm: 160, totalMin: null },
       seeded(1)
     );
     extraPerWaypointM = 0;
@@ -241,12 +237,63 @@ describe('Surprise Me end to end (fake OSRM and Overpass)', () => {
   test('along a route: limits shorter than the direct trip give a clear message', async () => {
     cacheClear();
     await assert.rejects(
-      surpriseRoute({ origin, destination, radiusKm: 10, maxTotalKm: 100, totalMin: null, breakMin: 90 }, seeded(1)),
+      surpriseRoute({ origin, destination, radiusKm: 10, maxTotalKm: 100, totalMin: null }, seeded(1)),
       (error: { status?: number; message: string }) => error.status === 422 && /direct route is already 13\d km/.test(error.message)
     );
     await assert.rejects(
-      surpriseRoute({ origin, destination, radiusKm: 10, maxTotalKm: null, totalMin: 200, breakMin: 90 }, seeded(1)),
-      (error: { status?: number; message: string }) => error.status === 422 && /reserved for breaks/.test(error.message)
+      surpriseRoute({ origin, destination, radiusKm: 10, maxTotalKm: null, totalMin: 130 }, seeded(1)),
+      (error: { status?: number; message: string }) => error.status === 422 && /drive alone takes/.test(error.message)
     );
+  });
+
+  test('category filter: only beaches (or only waterfalls) come back, from the real search', async () => {
+    cacheClear();
+    const falls = await surpriseAround({ start: here, tripType: 'roundtrip', timeMin: 240, maxKm: 100, themes: ['waterfall'] }, seeded(3));
+    assert.ok(falls.stops.length >= 1);
+    assert.ok(falls.stops.every((stop) => stop.themes?.includes('waterfall')), 'every stop must be a waterfall');
+  });
+
+  test('category filter: a kind with nothing nearby gives a clear message, not unrelated places', async () => {
+    cacheClear();
+    await assert.rejects(
+      surpriseAround({ start: here, tripType: 'roundtrip', timeMin: 240, maxKm: 100, themes: ['cave'] }, seeded(3)),
+      (error: { status?: number; message: string; details?: { reason?: string } }) =>
+        error.status === 422 && error.details?.reason === 'no-match' && /caves/i.test(error.message)
+    );
+  });
+
+  test('Roll Again: never repeats a place until the matching places run out, then says so', async () => {
+    cacheClear();
+    const seen: string[] = [];
+    let exhausted = false;
+    for (let round = 0; round < 12 && !exhausted; round++) {
+      try {
+        const result = await surpriseAround(
+          { start: here, tripType: 'roundtrip', timeMin: 240, maxKm: 100, themes: ['waterfall'], excludeIds: seen },
+          seeded(10 + round)
+        );
+        for (const stop of result.stops) {
+          assert.ok(!seen.includes(stop.id), `${stop.id} was shown twice`);
+          seen.push(stop.id);
+        }
+      } catch (error) {
+        assert.equal((error as { details?: { reason?: string } }).details?.reason, 'exhausted');
+        exhausted = true;
+      }
+    }
+    assert.ok(seen.length >= 2, 'at least a few places were shown before running out');
+    assert.ok(exhausted, 'the pool runs out and the server says so');
+  });
+
+  test('Roll Again along a route also skips places already shown', async () => {
+    cacheClear();
+    const first = await surpriseRoute({ origin, destination, radiusKm: 10, maxTotalKm: 200, totalMin: null }, seeded(5));
+    const shown = first.stops.map((stop) => stop.id);
+    assert.ok(shown.length >= 1);
+    const second = await surpriseRoute(
+      { origin, destination, radiusKm: 10, maxTotalKm: 200, totalMin: null, excludeIds: shown },
+      seeded(6)
+    );
+    assert.ok(second.stops.every((stop) => !shown.includes(stop.id)));
   });
 });

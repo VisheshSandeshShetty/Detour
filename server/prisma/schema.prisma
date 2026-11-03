@@ -21,6 +21,7 @@ model User {
   createdAt    DateTime     @default(now())
   journeys     Journey[]
   savedPlaces  SavedPlace[]
+  savedTrips   SavedTrip[]
 }
 
 model Place {
@@ -86,4 +87,44 @@ model JourneyStop {
 
   @@unique([journeyId, placeId])
   @@index([placeId])
+}
+
+// A complete saved trip: Plan a Journey, Surprise Me Along This Route, or Surprise Me around a point.
+// Saving a trip is separate from favouriting places: the stops live INSIDE the trip (as JSON), so a
+// trip never creates favourites and never breaks if a Place row is later removed.
+model SavedTrip {
+  id                   Int      @id @default(autoincrement())
+  userId               Int
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                 String
+  // "journey" | "surprise-route" | "surprise-around"
+  kind                 String
+  originName           String
+  originLatitude       Float
+  originLongitude      Float
+  destinationName      String
+  destinationLatitude  Float
+  destinationLongitude Float
+  // Corridor width in km (journey and surprise-route only)
+  corridorRadius       Int?
+  // The whole trip, in km and minutes (for Surprise trips the minutes include visits)
+  totalDistanceKm      Float
+  totalDurationMin     Float
+  // Driving only (equal to the totals for a plain journey)
+  drivingDistanceKm    Float
+  drivingDurationMin   Float
+  // Route line as [[lon, lat], ...] so the trip can be redrawn without calling a routing service
+  geometry             Json?
+  // Ordered stops: [{ id, name, category, latitude, longitude, ... }]
+  stops                Json
+  // Extra data needed to restore the screen exactly (surprise summary, trip type ...)
+  settings             Json?
+  // Hash of kind + start + end + ordered stop ids. Saving the same trip twice returns the first save.
+  fingerprint          String
+  createdAt            DateTime @default(now())
+  // Changes every time the trip is edited and saved again
+  updatedAt            DateTime @default(now()) @updatedAt
+
+  @@unique([userId, fingerprint])
+  @@index([userId, createdAt])
 }

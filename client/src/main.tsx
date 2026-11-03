@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
+import { ActiveTripProvider } from './context/ActiveTripContext';
 import { AuthProvider } from './context/AuthContext';
 import { SavedPlacesProvider } from './context/SavedPlacesContext';
 import './index.css';
@@ -13,7 +14,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <BrowserRouter>
       <AuthProvider>
         <SavedPlacesProvider>
-          <App />
+          <ActiveTripProvider>
+            <App />
+          </ActiveTripProvider>
         </SavedPlacesProvider>
       </AuthProvider>
     </BrowserRouter>

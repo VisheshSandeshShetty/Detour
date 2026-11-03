@@ -170,3 +170,43 @@
   stroke-dasharray: 10 10;
   animation: detour-dash 1.2s linear infinite;
 }
+
+/* ---------- Surprise Me: rolling and reveal animations ---------- */
+@keyframes detour-roll {
+  0% { transform: rotate(0deg) scale(1); }
+  25% { transform: rotate(-18deg) scale(1.15); }
+  50% { transform: rotate(14deg) scale(1.2); }
+  75% { transform: rotate(-10deg) scale(1.1); }
+  100% { transform: rotate(0deg) scale(1); }
+}
+@keyframes detour-reveal {
+  from { opacity: 0; transform: translateY(14px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.detour-rolling { animation: detour-roll 0.55s ease-in-out infinite; }
+.detour-reveal { opacity: 0; animation: detour-reveal 0.45s ease-out forwards; }
+.detour-fade-out { opacity: 0.35; transition: opacity 0.2s ease; }
+@media (prefers-reduced-motion: reduce) {
+  .detour-rolling { animation: none; }
+  .detour-reveal { animation: none; opacity: 1; }
+}
+
+/* Numbered, highlighted marker for a stop that is part of the trip */
+.detour-stop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9999px;
+  background: #d97706;
+  color: #fff;
+  border: 3px solid #fff;
+  font-weight: 800;
+  font-size: 15px;
+  box-shadow: 0 0 0 2px #92400e, 0 4px 10px rgba(0, 0, 0, 0.35);
+}
+.detour-stop.is-selected {
+  transform: scale(1.18);
+  box-shadow: 0 0 0 3px #1f4a3a, 0 6px 14px rgba(0, 0, 0, 0.4);
+}

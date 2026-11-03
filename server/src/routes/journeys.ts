@@ -11,7 +11,9 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { prisma } from '../lib/prisma';
 import { AppError } from '../lib/errors';
-import { idParamSchema, planSchema, saveJourneySchema } from '../lib/schemas';
+import { idParamSchema, planSchema, routeThroughSchema, saveJourneySchema } from '../lib/schemas';
+import { simplifyRoute } from '../services/corridor';
+import { getRouteThrough } from '../services/osrm';
 import { currentUserId, requireAuth } from '../middleware/auth';
 import { planJourney } from '../services/journeyPlanner';
 import { placeRowToDTO, upsertPlace } from '../services/placeStore';
@@ -42,6 +44,20 @@ router.post('/plan', planLimiter, async (req, res) => {
   const { origin, destination, radiusKm } = planSchema.parse(req.body);
   const plan = await planJourney({ origin, destination, radiusKm });
   res.json({ data: plan });
+});
+
+// POST /api/journeys/route  the real driving route through origin, my stops (in order) and destination.
+// Used to update distance, time and the line on the map whenever the stops of a trip change.
+router.post('/route', planLimiter, async (req, res) => {
+  const { origin, destination, stops } = routeThroughSchema.parse(req.body);
+  const route = await getRouteThrough([origin, ...stops, destination]);
+  res.json({
+    data: {
+      distanceKm: Math.round(route.distanceKm * 10) / 10,
+      durationMin: Math.round(route.durationMin),
+      geometry: simplifyRoute(route.coordinates, 3000).map(([lon, lat]) => [Math.round(lon * 1e5) / 1e5, Math.round(lat * 1e5) / 1e5]),
+    },
+  });
 });
 
 router.get('/:id/attractions', requireAuth, async (req, res) => {

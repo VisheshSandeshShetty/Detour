@@ -1,12 +1,10 @@
 // /api/surprise/*  : Surprise Me (public, nothing is saved)
 //
-//   GET  /settings   the reserved-break default, so the app shows the same number as the server uses
 //   POST /around     random trip around a starting point
 //   POST /route      random stops along a planned route, inside a time/distance budget
 
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
-import { config } from '../config';
 import { surpriseAroundSchema, surpriseRouteSchema } from '../lib/schemas';
 import { surpriseAround, surpriseRoute } from '../services/surprise';
 
@@ -21,10 +19,6 @@ const surpriseLimiter = rateLimit({
   message: { error: { message: 'You have used Surprise Me a lot. Please wait a few minutes and try again.' } },
 });
 
-router.get('/settings', (_req, res) => {
-  res.json({ data: { breakMin: config.surpriseBreakMin } });
-});
-
 router.post('/around', surpriseLimiter, async (req, res) => {
   const body = surpriseAroundSchema.parse(req.body);
   const result = await surpriseAround({
@@ -32,7 +26,8 @@ router.post('/around', surpriseLimiter, async (req, res) => {
     tripType: body.tripType,
     timeMin: body.timeMin ?? null,
     maxKm: body.maxKm ?? null,
-    breakMin: body.breakMin,
+    themes: body.themes,
+    excludeIds: body.excludeIds,
   });
   res.json({ data: result });
 });
@@ -45,7 +40,8 @@ router.post('/route', surpriseLimiter, async (req, res) => {
     radiusKm: body.radiusKm,
     maxTotalKm: body.maxTotalKm ?? null,
     totalMin: body.totalMin ?? null,
-    breakMin: body.breakMin ?? config.surpriseBreakMin,
+    themes: body.themes,
+    excludeIds: body.excludeIds,
   });
   res.json({ data: result });
 });

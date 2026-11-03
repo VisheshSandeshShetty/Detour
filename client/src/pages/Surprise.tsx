@@ -1,15 +1,20 @@
 // "/surprise"  Surprise Me: tell us how much time or distance you have, and we pick a random trip
 // of interesting places around you. Round trip or one way.
 
-import { Loader2, LocateFixed, MapPin, Sparkles } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { Dices, Loader2, LocateFixed, MapPin, Sparkles } from 'lucide-react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import LocationSearch from '../components/LocationSearch';
 import MapView from '../components/MapView';
 import SurpriseLimits, { readLimits } from '../components/SurpriseLimits';
+import SurpriseFilter, { FilterSummary } from '../components/SurpriseFilter';
 import SurpriseTrip from '../components/SurpriseTrip';
 import { ErrorBanner } from '../components/ui';
-import { api, errorMessage, isAbort } from '../lib/api';
-import type { NamedLocation, SurpriseResult } from '../types';
+import { api } from '../lib/api';
+import type { ThemeKey } from '../lib/themes';
+import { useSurpriseSession } from '../lib/useSurpriseSession';
+import { useSaveSurprise } from '../lib/useSaveSurprise';
+import { stopNumbers } from '../lib/trip';
+import type { NamedLocation } from '../types';
 
 export default function Surprise() {
   const [startText, setStartText] = useState('');
@@ -18,15 +23,21 @@ export default function Surprise() {
   const [km, setKm] = useState('100');
   const [tripType, setTripType] = useState<'roundtrip' | 'oneway'>('roundtrip');
 
-  const [result, setResult] = useState<SurpriseResult | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [themes, setThemes] = useState<ThemeKey[]>([]); // kinds of place; empty = anything
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [fitCount, setFitCount] = useState(0);
-  const controllerRef = useRef<AbortController | null>(null);
 
-  // Cancel a request that is still running if the user leaves the page
-  useEffect(() => () => controllerRef.current?.abort(), []);
+  // Reads the form as it is RIGHT NOW. Roll Again calls this again, so it keeps the filters.
+  // It throws a readable message if the form is not filled in properly.
+  async function ask(excludeIds: string[]) {
+    if (!start) throw new Error('Choose a starting place first, or use your location.');
+    const limits = readLimits(hours, km);
+    if (!limits.ok) throw new Error(limits.message);
+    return api.surpriseAround({ start, tripType, timeMin: limits.timeMin, maxKm: limits.km, themes, excludeIds });
+  }
+  const session = useSurpriseSession(ask);
+  const { result } = session;
+  const saver = useSaveSurprise();
 
   // "Around me" is the default, so try the browser location once. A refusal is fine: they can type a place.
   const [locating, setLocating] = useState(false);
@@ -56,40 +67,15 @@ export default function Surprise() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function run() {
+  function surprise() {
     setError(null);
-    if (!start) {
-      setError('Choose a starting place first, or use your location.');
-      return;
-    }
-    const limits = readLimits(hours, km);
-    if (!limits.ok) {
-      setError(limits.message);
-      return;
-    }
-    controllerRef.current?.abort();
-    const controller = new AbortController();
-    controllerRef.current = controller;
-    setLoading(true);
-    try {
-      const data = await api.surpriseAround(
-        { start, tripType, timeMin: limits.timeMin, maxKm: limits.km },
-        controller.signal
-      );
-      setResult(data);
-      setSelectedId(null);
-      setFitCount((n) => n + 1);
-    } catch (e) {
-      if (isAbort(e)) return;
-      setError(errorMessage(e));
-    } finally {
-      if (controllerRef.current === controller) setLoading(false);
-    }
+    setSelectedId(null);
+    void session.startNew();
   }
 
   function onSubmit(event: FormEvent) {
     event.preventDefault();
-    void run();
+    surprise();
   }
 
   const routeLatLng = useMemo(
@@ -161,11 +147,16 @@ export default function Surprise() {
           </fieldset>
 
           {error && <ErrorBanner message={error} />}
+          {!result && session.failure && <ErrorBanner message={session.failure.message} />}
 
-          <button className="btn-primary w-full py-3" type="submit" disabled={loading}>
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-            {loading ? 'Finding surprises…' : 'Surprise me'}
-          </button>
+          <div className="flex gap-2">
+            <button className="btn-primary flex-1 py-3" type="submit" disabled={session.rolling}>
+              {session.rolling && !result ? <Dices className="h-4 w-4 detour-rolling" /> : <Sparkles className="h-4 w-4" />}
+              {session.rolling && !result ? 'Rolling…' : result ? 'New surprise' : 'Surprise me'}
+            </button>
+            <SurpriseFilter selected={themes} onChange={setThemes} disabled={session.rolling} />
+          </div>
+          <FilterSummary selected={themes} onChange={setThemes} />
         </form>
 
         {result && (
@@ -173,9 +164,23 @@ export default function Surprise() {
             result={result}
             selectedId={selectedId}
             onSelect={setSelectedId}
-            onShuffle={() => void run()}
-            shuffling={loading}
+            onRoll={() => {
+              setSelectedId(null);
+              void session.rollAgain();
+            }}
+            rolling={session.rolling}
+            canGoBack={session.canGoBack}
+            canGoForward={session.canGoForward}
+            onBack={session.back}
+            onForward={session.forward}
+            failure={session.failure}
+            onStartOver={() => surprise()}
+            rollKey={session.rollKey}
             fromPath="/surprise"
+            onSave={() => void saver.save(result)}
+            saving={saver.saving}
+            savedTripId={saver.savedIdFor(result)}
+            saveError={saver.error}
           />
         )}
       </div>
@@ -188,7 +193,8 @@ export default function Surprise() {
           route={routeLatLng}
           origin={result?.start ?? start ?? undefined}
           center={start ? [start.latitude, start.longitude] : undefined}
-          fitKey={`surprise-${fitCount}-${start?.latitude ?? 0}`}
+          stopNumbers={stopNumbers(result?.stops ?? [])}
+          fitKey={`surprise-${session.rollKey}-${start?.latitude ?? 0}`}
           fromPath="/surprise"
         />
       </div>

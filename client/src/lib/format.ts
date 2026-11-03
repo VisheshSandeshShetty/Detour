@@ -40,21 +40,3 @@ export function googleMapsUrl(name: string, latitude: number, longitude: number)
 export function openStreetMapUrl(latitude: number, longitude: number): string {
   return `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}#map=16/${latitude}/${longitude}`;
 }
-
-// One Google Maps link for the whole Surprise trip: start, the stops in order, then the end.
-// Google Maps accepts up to 9 waypoints, which is more than the 5 stops we ever pick.
-export function googleMapsTripUrl(
-  start: { latitude: number; longitude: number },
-  stops: { latitude: number; longitude: number }[],
-  end: { latitude: number; longitude: number }
-): string {
-  const point = (p: { latitude: number; longitude: number }) => `${p.latitude},${p.longitude}`;
-  const params = new URLSearchParams({
-    api: '1',
-    origin: point(start),
-    destination: point(end),
-    travelmode: 'driving',
-  });
-  if (stops.length > 0) params.set('waypoints', stops.map(point).join('|'));
-  return `https://www.google.com/maps/dir/?${params.toString()}`;
-}

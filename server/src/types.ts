@@ -12,6 +12,8 @@ export interface NamedLocation extends LatLon {
 }
 
 // A place as the frontend sees it.
+import type { ThemeKey } from './lib/themes';
+
 export interface PlaceDTO {
   // OpenStreetMap identity, e.g. "node-123456". Also used in the URL: /places/node-123456
   id: string;
@@ -25,6 +27,8 @@ export interface PlaceDTO {
   imageUrl: string | null;
   openingHours: string | null;
   website: string | null;
+  // Finer kinds of place (beach, waterfall ...) used by the Surprise Me filter
+  themes?: ThemeKey[];
 
   // Only set for "nearby" searches: straight-line distance from the search point
   distanceKm?: number;

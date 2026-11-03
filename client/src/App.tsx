@@ -33,6 +33,7 @@ export default function App() {
         <Route path="/journey" element={<JourneyPlanner />} />
         <Route path="/surprise" element={<Surprise />} />
         <Route path="/journey/:id" element={<JourneyResults />} />
+        <Route path="/trip/:id" element={<JourneyResults />} />
         <Route path="/places/:id" element={<PlaceDetailsPage />} />
         <Route
           path="/saved"

@@ -16,6 +16,7 @@
 
 import { VISIT_MINUTES, type CategoryKey } from '../lib/categories';
 import { AppError } from '../lib/errors';
+import { matchesThemes, themeNames, type ThemeKey } from '../lib/themes';
 import type { NamedLocation, PlaceDTO, SurpriseResult, SurpriseStop } from '../types';
 import { simplifyRoute } from './corridor';
 import { planJourney } from './journeyPlanner';
@@ -40,6 +41,47 @@ function formatMinutes(minutes: number): string {
   if (hours === 0) return `${mins} min`;
   return mins === 0 ? `${hours} h` : `${hours} h ${mins} min`;
 }
+
+// ---------------------------------------------------------------------------------------
+// 0. Filters: which kinds of place, and "not the ones already shown" (Roll Again)
+// ---------------------------------------------------------------------------------------
+
+export interface PoolFilters {
+  themes?: ThemeKey[]; // empty or missing = anything
+  excludeIds?: string[]; // places already shown in this Surprise Me session
+}
+
+// Keeps only places of the chosen kinds, then drops the ones already shown.
+// It says WHY the pool is empty, because the page needs different advice for each reason:
+//   no-match   = nothing of that kind is within reach at all (try other kinds or a bigger area)
+//   exhausted  = there were matches, but you have already seen them all (start over)
+export function applyPoolFilters<T extends { id: string; themes?: ThemeKey[] }>(places: T[], filters: PoolFilters): T[] {
+  const themes = filters.themes ?? [];
+  const matching = places.filter((place) => matchesThemes(place, themes));
+  if (matching.length === 0) {
+    throw new AppError(
+      422,
+      themes.length > 0
+        ? `No ${themeNames(themes)} were found within reach. Try other kinds of place, or allow more distance or time.`
+        : 'No places found within reach. Try a bit more distance or time, or a different starting point.',
+      { reason: 'no-match' }
+    );
+  }
+  const seen = new Set(filters.excludeIds ?? []);
+  const fresh = matching.filter((place) => !seen.has(place.id));
+  if (fresh.length === 0) {
+    throw new AppError(
+      422,
+      'You have seen every matching place for this search. Start over to see them again, or change the filters.',
+      { reason: 'exhausted' }
+    );
+  }
+  return fresh;
+}
+
+// Along a trip we vary the kinds of place. When the user picked specific kinds (say only beaches)
+// that rule would make no sense, so it is relaxed.
+const perCategoryLimit = (themes: ThemeKey[] | undefined) => (themes && themes.length > 0 ? MAX_STOPS : MAX_PER_CATEGORY);
 
 // ---------------------------------------------------------------------------------------
 // 1. Random choice with weights
@@ -171,6 +213,8 @@ export interface AroundRequest {
   timeMin: number | null; // total time available, null = no time limit
   maxKm: number | null; // maximum driving distance, null = no distance limit
   breakMin?: number; // reserved rest time (default 0 for Around me)
+  themes?: ThemeKey[];
+  excludeIds?: string[];
 }
 
 export async function surpriseAround(request: AroundRequest, rng: Rng = Math.random): Promise<SurpriseResult> {
@@ -190,13 +234,15 @@ export async function surpriseAround(request: AroundRequest, rng: Rng = Math.ran
 
   // A place further away (in a straight line) than the limit allows can never fit, whatever the roads are like
   const reachKm = maxKm === null ? Infinity : roundTrip ? maxKm / 2 : maxKm;
-  const pool = nearby.places.filter((place) => (place.distanceKm ?? 0) >= 0.2 && (place.distanceKm ?? 0) <= reachKm);
-  if (pool.length === 0) {
+  const inReach = nearby.places.filter((place) => (place.distanceKm ?? 0) >= 0.2 && (place.distanceKm ?? 0) <= reachKm);
+  if (inReach.length === 0 && !request.themes?.length) {
     throw new AppError(
       422,
-      'No places found within reach. Try a bit more distance or time, or a different starting point.'
+      'No places found within reach. Try a bit more distance or time, or a different starting point.',
+      { reason: 'no-match' }
     );
   }
+  const pool = applyPoolFilters(inReach, { themes: request.themes, excludeIds: request.excludeIds });
 
   // 2. A random, interest-weighted selection of candidates
   const candidates = weightedShuffle(pool, interestWeight, rng).slice(0, MAX_CANDIDATES);
@@ -224,7 +270,7 @@ export async function surpriseAround(request: AroundRequest, rng: Rng = Math.ran
       maxMeters: maxKm === null ? null : maxKm * 1000,
       maxSeconds: timeMin === null ? null : (timeMin - breakMin) * 60,
       maxStops: MAX_STOPS,
-      maxPerCategory: MAX_PER_CATEGORY,
+      maxPerCategory: perCategoryLimit(request.themes),
     }
   );
   const cost = legsCost(order, matrix, roundTrip);
@@ -326,12 +372,17 @@ export interface RouteRequest {
   destination: NamedLocation;
   radiusKm: number; // corridor radius, same as the planner
   maxTotalKm: number | null; // limit for the whole trip, null = none
-  totalMin: number | null; // time for the whole trip INCLUDING the reserved break, null = none
-  breakMin: number; // reserved rest time (default 90)
+  // Time for the WHOLE trip: driving, breaks and time at the places are all inside it. null = none.
+  totalMin: number | null;
+  breakMin?: number; // internal only (tests); the app no longer asks for a reserved break
+
+  themes?: ThemeKey[];
+  excludeIds?: string[];
 }
 
 export async function surpriseRoute(request: RouteRequest, rng: Rng = Math.random): Promise<SurpriseResult> {
-  const { origin, destination, radiusKm, maxTotalKm, totalMin, breakMin } = request;
+  const { origin, destination, radiusKm, maxTotalKm, totalMin } = request;
+  const breakMin = request.breakMin ?? 0;
 
   // The direct trip (this is cached, so it is quick if the user just planned it)
   const plan = await planJourney({ origin, destination, radiusKm });
@@ -340,7 +391,7 @@ export async function surpriseRoute(request: RouteRequest, rng: Rng = Math.rando
 
   // How much room is left for surprises?
   //   distance: 400 km allowed - 360 km direct = 40 km of detours
-  //   time:     8 h allowed - 6 h driving - 90 min reserved break = 30 min for detours AND time at the places
+  //   time:     8 h allowed - 6 h direct driving = 2 h for detour driving AND time at the places (counted once each)
   const extraKm = maxTotalKm === null ? null : maxTotalKm - baseKm;
   const extraMin = totalMin === null ? null : totalMin - breakMin - baseMin;
   if (extraKm !== null && extraKm <= 0) {
@@ -352,18 +403,20 @@ export async function surpriseRoute(request: RouteRequest, rng: Rng = Math.rando
   if (extraMin !== null && extraMin <= 0) {
     throw new AppError(
       422,
-      `The drive alone takes ${formatMinutes(baseMin)} and ${breakMin} min are reserved for breaks. Allow more than ${formatMinutes(baseMin + breakMin)} to leave room for surprises.`
+      `The drive alone takes ${formatMinutes(baseMin)}. Allow more than that to leave room for surprises.`
     );
   }
 
-  // Only places whose detour we could actually calculate
-  const pool = plan.attractions.filter((place) => place.detourDistanceKm != null && place.detourDurationMin != null);
-  if (pool.length === 0) {
+  // Only places whose detour we could actually calculate, of the chosen kinds, not shown before
+  const withDetour = plan.attractions.filter((place) => place.detourDistanceKm != null && place.detourDurationMin != null);
+  if (withDetour.length === 0) {
     throw new AppError(
       422,
-      plan.warnings[0] ?? 'No places with a known detour were found along this route. Try a wider corridor radius.'
+      plan.warnings[0] ?? 'No places with a known detour were found along this route. Try a wider corridor radius.',
+      { reason: 'no-match' }
     );
   }
+  const pool = applyPoolFilters(withDetour, { themes: request.themes, excludeIds: request.excludeIds });
 
   type Candidate = RouteCandidate & { place: PlaceDTO };
   const candidates: Candidate[] = pool.map((place) => ({
@@ -379,7 +432,7 @@ export async function surpriseRoute(request: RouteRequest, rng: Rng = Math.rando
   let stops = chooseRouteStops(shuffled, extraKm, extraMin, {
     maxStops: MAX_STOPS,
     minGapKm: MIN_GAP_ON_ROUTE_KM,
-    maxPerCategory: MAX_PER_CATEGORY,
+    maxPerCategory: perCategoryLimit(request.themes),
   });
 
   // The numbers above add up each place's separate detour, which is an estimate. Now we check the

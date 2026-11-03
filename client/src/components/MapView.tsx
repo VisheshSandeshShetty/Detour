@@ -13,6 +13,7 @@ import { CATEGORY_INFO } from '../lib/categories';
 import type { NamedLocation, Place } from '../types';
 import DetourStats from './DetourStats';
 import { PlaceImage } from './PlaceCard';
+import { api } from '../lib/api';
 import { formatKm, googleMapsUrl } from '../lib/format';
 
 const TILE_URL = import.meta.env.VITE_TILE_URL ?? 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
@@ -43,6 +44,24 @@ function pinIcon(color: string, selected: boolean): L.DivIcon {
           iconAnchor: [15, 36],
         });
     iconCache.set(key, icon);
+  }
+  return icon;
+}
+
+// A stop of the trip: big amber disc with its number. Clearly different from ordinary pins and
+// as prominent as the A / B markers.
+const stopIconCache = new Map<string, L.DivIcon>();
+function stopIcon(number: number, selected: boolean): L.DivIcon {
+  const key = `${number}-${selected}`;
+  let icon = stopIconCache.get(key);
+  if (!icon) {
+    icon = L.divIcon({
+      className: '',
+      html: `<div class="detour-stop${selected ? ' is-selected' : ''}" data-stop-number="${number}">${number}</div>`,
+      iconSize: [34, 34],
+      iconAnchor: [17, 17],
+    });
+    stopIconCache.set(key, icon);
   }
   return icon;
 }
@@ -121,12 +140,29 @@ function MapBehaviour({ fitKey, route, center, selected, fitPlaces }: MapBehavio
 // The popup that opens for the selected place
 // ---------------------------------------------------------------------------------------
 
+// Small photo for the popup: the place's own image if it has one, otherwise the first real photo found
+// for it (the same search as Place Details, cached). Falls back to the category icon.
+function PreviewImage({ place }: { place: Place }) {
+  const [url, setUrl] = useState<string | null>(place.imageUrl);
+  useEffect(() => {
+    setUrl(place.imageUrl);
+    if (place.imageUrl) return;
+    const controller = new AbortController();
+    api
+      .placePhotos(place)
+      .then((result) => setUrl(result.photos[0]?.url ?? null))
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [place.id]);
+  return <PlaceImage place={{ ...place, imageUrl: url }} className="h-14 w-14 shrink-0 rounded-lg" />;
+}
+
 function PlacePreview({ place, fromPath }: { place: Place; fromPath?: string }) {
   const info = CATEGORY_INFO[place.category];
   return (
     <div className="w-52">
       <div className="flex gap-2.5">
-        <PlaceImage place={place} className="h-14 w-14 shrink-0 rounded-lg" />
+        <PreviewImage place={place} />
         <div className="min-w-0">
           <p className="line-clamp-2 text-sm font-bold leading-snug">{place.name}</p>
           <p className="mt-0.5 text-xs font-semibold" style={{ color: info.color }}>
@@ -173,6 +209,8 @@ interface MapViewProps {
   center?: [number, number]; // where to look when there is no route
   fitKey?: string; // change this to make the map re-frame itself
   fromPath?: string; // passed on to the details page so it can link back
+  // place id -> its number in the trip (1, 2, 3 ...). Places listed here get the highlighted numbered marker.
+  stopNumbers?: Record<string, number>;
   className?: string;
 }
 
@@ -187,6 +225,7 @@ export default function MapView({
   center,
   fitKey,
   fromPath,
+  stopNumbers,
   className = '',
 }: MapViewProps) {
   const [tilesFailed, setTilesFailed] = useState(false);
@@ -255,12 +294,13 @@ export default function MapView({
 
         {places.map((place) => {
           const isSelected = place.id === selectedId;
+          const stopNumber = stopNumbers?.[place.id];
           return (
             <Marker
-              key={place.id}
+              key={`${place.id}-${stopNumber ?? 'plain'}`}
               position={[place.latitude, place.longitude]}
-              icon={pinIcon(CATEGORY_INFO[place.category].color, isSelected)}
-              zIndexOffset={isSelected ? 1000 : 0}
+              icon={stopNumber ? stopIcon(stopNumber, isSelected) : pinIcon(CATEGORY_INFO[place.category].color, isSelected)}
+              zIndexOffset={isSelected ? 1200 : stopNumber ? 800 : 0}
               eventHandlers={{ click: () => onSelect(place.id) }}
             />
           );
@@ -270,7 +310,7 @@ export default function MapView({
           <Popup
             key={selected.id}
             position={[selected.latitude, selected.longitude]}
-            offset={[0, -44]}
+            offset={[0, selected && stopNumbers?.[selected.id] ? -20 : -44]}
             eventHandlers={{
               remove: () => {
                 // Only treat it as "closed by the user" if this place is still the selected one

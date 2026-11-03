@@ -19,13 +19,14 @@ export async function findNearbyPlaces(
   latitude: number,
   longitude: number,
   radiusKm: number,
-  maxResults = DEFAULT_MAX_RESULTS
+  maxResults = DEFAULT_MAX_RESULTS,
+  onProgress?: (done: number, total: number) => void
 ): Promise<NearbyResult> {
   const cacheKey = `nearby:${latitude.toFixed(3)},${longitude.toFixed(3)}:${radiusKm}:${maxResults}`;
   const cached = cacheGet<NearbyResult>(cacheKey);
   if (cached) return cached;
 
-  const { candidates, warning } = await fetchNearbyCandidates(latitude, longitude, radiusKm);
+  const { candidates, warning } = await fetchNearbyCandidates(latitude, longitude, radiusKm, onProgress);
 
   const here = turf.point([longitude, latitude]);
   const places = removeDuplicates(candidates)

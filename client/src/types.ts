@@ -118,7 +118,7 @@ export interface SurpriseSummary {
   drivingKm: number;
   drivingMin: number;
   visitMin: number;
-  breakMin: number; // RESERVED rest/food/fuel time, not exploration time
+  breakMin: number; // always 0 now: the entered total already includes everything
   totalMin: number;
   maxKm: number | null;
   maxMin: number | null;
@@ -135,4 +135,75 @@ export interface SurpriseResult {
   summary: SurpriseSummary;
   geometry: number[][] | null;
   warnings: string[];
+}
+
+// ---------------- Photos (mirrors server/src/services/photos) ----------------
+export interface PlacePhoto {
+  url: string;
+  pageUrl: string;
+  title: string;
+  author: string | null;
+  license: string | null;
+  licenseUrl: string | null;
+  attribution: string;
+  source: 'osm-image' | 'wikidata' | 'commons-search';
+}
+export interface PhotosResult {
+  status: 'ok' | 'none' | 'unavailable';
+  photos: PlacePhoto[];
+  searched: string[];
+}
+
+// ---------------- Saved trips (mirrors server/src/services/savedTrips.ts) ----------------
+export type TripKind = 'journey' | 'surprise-route' | 'surprise-around';
+
+export interface NavigationLeg {
+  url: string;
+  fromName: string;
+  toName: string;
+  stopCount: number;
+}
+
+// A stop inside a trip: a Place plus, for surprise trips, the estimated visit time
+export type TripStop = Place & { visitMin?: number };
+
+export interface SavedTrip {
+  id: number;
+  name: string;
+  kind: TripKind;
+  origin: NamedLocation;
+  destination: NamedLocation;
+  radiusKm: number | null;
+  totalDistanceKm: number;
+  totalDurationMin: number;
+  drivingDistanceKm: number;
+  drivingDurationMin: number;
+  geometry: number[][] | null;
+  stops: TripStop[];
+  settings: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+  stopCount: number;
+  navigation: { legs: NavigationLeg[]; split: boolean };
+}
+
+export interface SaveTripBody {
+  kind: TripKind;
+  name?: string;
+  origin: NamedLocation;
+  destination: NamedLocation;
+  radiusKm: number | null;
+  totalDistanceKm: number;
+  totalDurationMin: number;
+  drivingDistanceKm: number;
+  drivingDurationMin: number;
+  geometry: number[][] | null;
+  stops: TripStop[];
+  settings?: Record<string, unknown> | null;
+}
+
+export interface RouteInfo {
+  distanceKm: number;
+  durationMin: number;
+  geometry: number[][];
 }

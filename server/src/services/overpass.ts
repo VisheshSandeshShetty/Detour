@@ -6,7 +6,11 @@
 
 import { config } from '../config';
 import { AppError } from '../lib/errors';
+import fs from 'node:fs';
+import path from 'node:path';
 import { cacheGet, cacheSet } from '../lib/cache';
+import { detectThemes } from '../lib/themes';
+import { DEMO_PLACES, DEMO_WARNING } from './demoPlaces';
 import { fetchJson, sleep } from '../lib/http';
 import type { CategoryKey } from '../lib/categories';
 import type { Candidate } from '../types';
@@ -40,6 +44,9 @@ function getFilters(group: 'core' | 'amenities', mode: SearchMode): string[] {
       // Entertainment
       '["tourism"="theme_park"]',
       '["leisure"="water_park"]',
+      // Adventure and activities
+      '["aerialway"="zip_line"]',
+      '["sport"~"^(climbing|canoe|kayak|scuba_diving|paragliding|surfing|rafting|diving)$"]',
     ];
     if (mode === 'nearby') {
       filters.push('["leisure"~"^(park|garden)$"]', '["amenity"~"^(cinema|theatre)$"]');
@@ -107,33 +114,65 @@ function serversInOrder(): string[] {
   return [...config.overpassUrls].sort((a, b) => Number(recentlyFailed(a)) - Number(recentlyFailed(b)));
 }
 
+// If a server has not answered after this long, the next one is started too (the first keeps running).
+// A dead or slow mirror then costs 6 seconds instead of its whole timeout. A server that FAILS
+// fast hands over to the next one immediately.
+const HEDGE_MS = 6000;
+
 export async function runOverpass(query: string, timeoutMs = 60000): Promise<OverpassElement[]> {
   const problems: string[] = [];
+  const order = serversInOrder();
 
-  for (const url of serversInOrder()) {
-    try {
-      const data = await fetchJson<OverpassResponse>(url, {
-        method: 'POST',
-        // Accept: */*  (not "application/json"). Some Overpass servers answer HTTP 406 Not Acceptable
-        // when a client asks for a specific type. The query itself already says [out:json].
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: '*/*' },
-        body: `data=${encodeURIComponent(query)}`,
-        timeoutMs,
-      });
-      // Overpass sometimes answers HTTP 200 but says in "remark" that the query ran out of time/memory
-      if (data.remark && /timed out|out of memory|runtime error/i.test(data.remark)) {
-        problems.push(`${hostOf(url)}: ${data.remark}`);
-        lastFailure.set(url, Date.now());
-        continue;
-      }
-      lastFailure.delete(url);
-      return data.elements ?? [];
-    } catch (error) {
-      lastFailure.set(url, Date.now());
-      // Remember why, then try the next server
-      problems.push(`${hostOf(url)}: ${error instanceof Error ? error.message : 'failed'}`);
-    }
+  async function ask(url: string): Promise<OverpassElement[]> {
+    const data = await fetchJson<OverpassResponse>(url, {
+      method: 'POST',
+      // Accept: */*  (not "application/json"). Some Overpass servers answer HTTP 406 Not Acceptable
+      // when a client asks for a specific type. The query itself already says [out:json].
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: '*/*' },
+      body: `data=${encodeURIComponent(query)}`,
+      timeoutMs,
+    });
+    // Overpass sometimes answers HTTP 200 but says in "remark" that the query ran out of time/memory
+    if (data.remark && /timed out|out of memory|runtime error/i.test(data.remark)) throw new Error(data.remark);
+    return data.elements ?? [];
   }
+
+  const elements = await new Promise<OverpassElement[] | null>((resolve) => {
+    let next = 0;
+    let running = 0;
+    let settled = false;
+    const timers: NodeJS.Timeout[] = [];
+    const finish = (value: OverpassElement[] | null) => {
+      if (settled) return;
+      settled = true;
+      timers.forEach(clearTimeout);
+      resolve(value);
+    };
+    const launch = () => {
+      if (settled || next >= order.length) return;
+      const url = order[next++];
+      running++;
+      const hedge = setTimeout(launch, HEDGE_MS);
+      timers.push(hedge);
+      ask(url).then(
+        (result) => {
+          lastFailure.delete(url);
+          finish(result);
+        },
+        (error) => {
+          lastFailure.set(url, Date.now());
+          problems.push(`${hostOf(url)}: ${error instanceof Error ? error.message : 'failed'}`);
+          running--;
+          clearTimeout(hedge);
+          if (settled) return;
+          if (next < order.length) launch();
+          else if (running === 0) finish(null);
+        }
+      );
+    };
+    launch();
+  });
+  if (elements) return elements;
 
   // This line is the first thing to look at in the server terminal when places do not load
   console.error('All Overpass servers failed ->', problems.join(' | '));
@@ -162,6 +201,8 @@ export function detectCategory(tags: Record<string, string>): CategoryKey | null
   if (
     tags.tourism === 'theme_park' ||
     tags.leisure === 'water_park' ||
+    tags.aerialway === 'zip_line' ||
+    typeof tags.sport === 'string' && /^(climbing|canoe|kayak|scuba_diving|paragliding|surfing|rafting|diving)$/.test(tags.sport) ||
     tags.amenity === 'cinema' ||
     tags.amenity === 'theatre'
   ) {
@@ -236,6 +277,7 @@ export function elementToCandidate(element: OverpassElement): Candidate | null {
     imageUrl: getImageUrl(tags),
     openingHours: tags.opening_hours ?? null,
     website: getWebsite(tags),
+    themes: detectThemes(tags),
     score: interestScore(tags, category),
   };
 }
@@ -361,8 +403,10 @@ export function tilesAround(lat: number, lon: number, radiusKm: number, tier: Ti
 // Tiles that a corridor (route plus radius on each side) passes through, in route order.
 // `route` is [lon, lat] pairs. We sample a point every ~10 km, so every place within the corridor
 // is inside a tile we pick. Extra tiles are harmless: Turf removes places outside the corridor later.
-export function tilesAlongRoute(route: number[][], radiusKm: number): Tile[] {
-  const SAMPLE_KM = 10;
+const SAMPLE_KM = 10;
+
+// A point about every 10 km along the route ([lon, lat] pairs)
+function sampleRoute(route: number[][]): number[][] {
   const samples: number[][] = [];
   let sinceLast = SAMPLE_KM;
   for (let i = 0; i < route.length; i++) {
@@ -372,6 +416,11 @@ export function tilesAlongRoute(route: number[][], radiusKm: number): Tile[] {
       sinceLast = 0;
     }
   }
+  return samples;
+}
+
+export function tilesAlongRoute(route: number[][], radiusKm: number): Tile[] {
+  const samples = sampleRoute(route);
   const reach = radiusKm + SAMPLE_KM / 2 + 1;
   const cell = TIERS.journey.cellDeg;
   const found = new Map<string, Tile>(); // Map keeps insertion order = order along the route
@@ -390,10 +439,63 @@ export function tilesAlongRoute(route: number[][], radiusKm: number): Tile[] {
   return [...found.values()];
 }
 
+// ---- Tiles saved on disk, so a server restart does not make the next search slow again ----
+const DISK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const DISK_MAX_TILES = 300;
+let disk: Map<string, { at: number; candidates: Candidate[] }> | null = null;
+let diskTimer: ReturnType<typeof setTimeout> | null = null;
+
+function loadDisk(): Map<string, { at: number; candidates: Candidate[] }> {
+  if (disk) return disk;
+  disk = new Map();
+  const file = config.tileCacheFile;
+  if (!file) return disk;
+  try {
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, { at: number; candidates: Candidate[] }>;
+    for (const [key, entry] of Object.entries(saved)) {
+      if (Date.now() - entry.at < DISK_TTL_MS) disk.set(key, entry);
+    }
+  } catch {
+    // no file yet, or it is damaged: start empty
+  }
+  return disk;
+}
+
+// Writes the cache file now. Called after a short delay, when the server stops, and by tests.
+export function flushTileCache() {
+  const file = config.tileCacheFile;
+  if (diskTimer) {
+    clearTimeout(diskTimer);
+    diskTimer = null;
+  }
+  if (!file || !disk) return;
+  try {
+    const entries = [...disk.entries()].sort((a, b) => b[1].at - a[1].at).slice(0, DISK_MAX_TILES);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const temp = `${file}.tmp`;
+    fs.writeFileSync(temp, JSON.stringify(Object.fromEntries(entries)));
+    fs.renameSync(temp, file); // replace in one step, so a crash cannot leave half a file
+  } catch (error) {
+    console.warn('Could not save the tile cache:', error instanceof Error ? error.message : error);
+  }
+}
+
+function saveDiskSoon() {
+  if (!config.tileCacheFile || diskTimer) return;
+  diskTimer = setTimeout(flushTileCache, 3000); // wait a moment: several tiles usually arrive together
+  diskTimer.unref?.(); // never keep the server alive just for this
+}
+process.once('exit', flushTileCache);
+
 async function fetchTile(tile: Tile): Promise<Candidate[]> {
-  const key = `tile:${tile.tier}:${tile.row}:${tile.col}`;
+  const key = `tile:v2:${tile.tier}:${tile.row}:${tile.col}`;
   const cached = cacheGet<Candidate[]>(key);
   if (cached) return cached;
+  const onDisk = loadDisk().get(key);
+  if (onDisk) {
+    cacheSet(key, onDisk.candidates, TILE_CACHE_SECONDS);
+    return onDisk.candidates;
+  }
 
   const { cellDeg, limit, filters } = TIERS[tile.tier];
   const south = tile.row * cellDeg;
@@ -402,6 +504,10 @@ async function fetchTile(tile: Tile): Promise<Candidate[]> {
   const query = buildQuery(bbox, filters(), limit).replace('[timeout:90]', '[timeout:25]');
   const candidates = toCandidates(await runOverpass(query, TILE_TIMEOUT_MS));
   cacheSet(key, candidates, TILE_CACHE_SECONDS);
+  if (config.tileCacheFile) {
+    loadDisk().set(key, { at: Date.now(), candidates });
+    saveDiskSoon();
+  }
   return candidates;
 }
 
@@ -414,13 +520,18 @@ export interface TileSearchResult {
 
 // Fetches tiles 2 at a time, in the order given, and stops starting new ones after `budgetMs`.
 // Partial results are kept. Only if EVERY tile fails do we throw the last error.
-export async function fetchTiles(tiles: Tile[], budgetMs: number): Promise<TileSearchResult> {
+export async function fetchTiles(
+  tiles: Tile[],
+  budgetMs: number,
+  onProgress?: (done: number, total: number) => void
+): Promise<TileSearchResult> {
   const deadline = Date.now() + budgetMs;
   const candidates: Candidate[] = [];
   let next = 0;
   let failed = 0;
   let succeeded = 0;
   let lastError: unknown = null;
+  onProgress?.(0, tiles.length);
 
   async function worker(workerIndex: number) {
     if (workerIndex > 0) await sleep(TILE_STAGGER_MS * workerIndex);
@@ -433,6 +544,7 @@ export async function fetchTiles(tiles: Tile[], budgetMs: number): Promise<TileS
         failed++;
         lastError = error;
       }
+      onProgress?.(succeeded + failed, tiles.length);
       await sleep(TILE_STAGGER_MS);
     }
   }
@@ -447,6 +559,7 @@ export interface CorridorFetchResult {
   candidates: Candidate[];
   failedStretches: number; // tiles that could not be searched (name kept for the planner)
   totalStretches: number; // total tiles along the route
+  demo?: boolean; // true = the built-in demo list was used because Overpass was unreachable
 }
 
 const JOURNEY_BUDGET_MS = 150000;
@@ -458,12 +571,24 @@ export async function fetchCorridorCandidates(
   radiusKm: number
 ): Promise<CorridorFetchResult> {
   const route = stretches.flat();
-  const result = await fetchTiles(tilesAlongRoute(route, radiusKm), JOURNEY_BUDGET_MS);
-  return {
-    candidates: result.candidates,
-    failedStretches: result.failedTiles + result.skippedTiles,
-    totalStretches: result.totalTiles,
-  };
+  const tiles = tilesAlongRoute(route, radiusKm);
+  try {
+    const result = await fetchTiles(tiles, JOURNEY_BUDGET_MS);
+    return {
+      candidates: result.candidates,
+      failedStretches: result.failedTiles + result.skippedTiles,
+      totalStretches: result.totalTiles,
+    };
+  } catch (error) {
+    // Everything failed. If the built-in demo places lie in the tiles we needed, show them (and say so).
+    const reach = radiusKm + SAMPLE_KM / 2 + 1;
+    const samples = sampleRoute(route);
+    const demo = DEMO_PLACES.filter((place) =>
+      samples.some(([lon, lat]) => haversineKm(lat, lon, place.latitude, place.longitude) <= reach)
+    );
+    if (demo.length === 0) throw error;
+    return { candidates: demo, failedStretches: 0, totalStretches: tiles.length, demo: true };
+  }
 }
 
 const NEARBY_BUDGET_MS = 45000;
@@ -472,16 +597,26 @@ const NEARBY_BUDGET_MS = 45000;
 export async function fetchNearbyCandidates(
   latitude: number,
   longitude: number,
-  radiusKm: number
+  radiusKm: number,
+  onProgress?: (done: number, total: number) => void
 ): Promise<{ candidates: Candidate[]; warning: string | null }> {
   const tiles = tilesAround(latitude, longitude, radiusKm, tierForRadius(radiusKm));
-  const result = await fetchTiles(tiles, NEARBY_BUDGET_MS);
-  const missing = result.failedTiles + result.skippedTiles;
-  const warning =
-    missing > 0
-      ? `Only ${result.totalTiles - missing} of ${result.totalTiles} map sections could be searched, so some places may be missing. Try again in a minute.`
-      : null;
-  return { candidates: result.candidates, warning };
+  try {
+    const result = await fetchTiles(tiles, NEARBY_BUDGET_MS, onProgress);
+    const missing = result.failedTiles + result.skippedTiles;
+    const warning =
+      missing > 0
+        ? `Only ${result.totalTiles - missing} of ${result.totalTiles} map sections could be searched, so some places may be missing. Try again in a minute.`
+        : null;
+    return { candidates: result.candidates, warning };
+  } catch (error) {
+    // Everything failed: fall back to the demo list if it has anything within the radius
+    const demo = DEMO_PLACES.filter(
+      (place) => haversineKm(latitude, longitude, place.latitude, place.longitude) <= radiusKm
+    );
+    if (demo.length === 0) throw error;
+    return { candidates: demo, warning: DEMO_WARNING };
+  }
 }
 
 // A single place by id, used by the Place Details page.

@@ -6,6 +6,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import LocationSearch from '../components/LocationSearch';
 import { ErrorBanner } from '../components/ui';
+import { useActiveTrip } from '../context/ActiveTripContext';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../lib/api';
 import { formatDate, formatDuration, formatKm } from '../lib/format';
@@ -22,6 +23,7 @@ interface PrefillState {
 
 export default function JourneyPlanner() {
   const navigate = useNavigate();
+  const activeTrip = useActiveTrip();
   const location = useLocation();
   const { user } = useAuth();
   const prefill = (location.state as PrefillState | null) ?? {};
@@ -87,6 +89,7 @@ export default function JourneyPlanner() {
       toLon: String(toLocation.longitude),
       radius: String(radiusKm),
     });
+    activeTrip.reset('', []); // a newly planned journey starts with an empty itinerary
     navigate(`/journey/new?${params.toString()}`);
   }
 
